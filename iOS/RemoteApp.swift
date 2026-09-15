@@ -5,22 +5,167 @@ import Network
 @main struct ModernRemoteApp: App {
     @StateObject private var remote = RemoteClient()
     @StateObject private var library = LibraryStore()
-    @State private var selectedTab = 3
     var body: some Scene {
         WindowGroup {
-            TabView(selection: $selectedTab) {
-                LibraryView().tabItem { Label("资料库", systemImage: "music.note.house") }.tag(0)
-                MacLibraryView().tabItem { Label("Mac 资料库", systemImage: "desktopcomputer") }.tag(1)
-                PlayerView().tabItem { Label("正在播放", systemImage: "play.circle.fill") }.tag(2)
-                ConnectionView().tabItem { Label("连接", systemImage: "wifi") }.tag(3)
-            }.tint(.pink).environmentObject(remote).environmentObject(library)
+            AdaptiveRemoteView()
+                .tint(.pink).environmentObject(remote).environmentObject(library)
                 .environment(\.locale, Locale(identifier: "zh_Hans"))
         }
     }
 }
+
+enum RemoteSection: String, CaseIterable, Identifiable {
+    case songs, albums, artists, playlists, macLibrary, player, connection
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .songs: return "歌曲"
+        case .albums: return "专辑"
+        case .artists: return "艺人"
+        case .playlists: return "播放列表"
+        case .macLibrary: return "Mac 资料库"
+        case .player: return "正在播放"
+        case .connection: return "连接"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .songs: return "music.note"
+        case .albums: return "square.stack.fill"
+        case .artists: return "person.fill"
+        case .playlists: return "music.note.list"
+        case .macLibrary: return "desktopcomputer"
+        case .player: return "play.circle.fill"
+        case .connection: return "wifi"
+        }
+    }
+    var category: String {
+        switch self {
+        case .albums: return "Albums"
+        case .artists: return "Artists"
+        case .playlists: return "Playlists"
+        default: return "Songs"
+        }
+    }
+}
+
+struct AdaptiveRemoteView: View {
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    @EnvironmentObject var remote: RemoteClient
+    @State private var selection: RemoteSection? = .connection
+    @State private var visibility: NavigationSplitViewVisibility = .all
+    @State private var pairingCode = ""
+    private var usesSidebar: Bool {
+        #if os(iOS)
+        return UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular
+        #else
+        return false
+        #endif
+    }
+    private var compactSelection: Binding<Int> {
+        Binding(get: {
+            switch selection {
+            case .macLibrary: return 1
+            case .player: return 2
+            case .connection, nil: return 3
+            default: return 0
+            }
+        }, set: { value in
+            switch value {
+            case 1: selection = .macLibrary
+            case 2: selection = .player
+            case 3: selection = .connection
+            default: selection = .songs
+            }
+        })
+    }
+    var body: some View {
+        Group {
+            if usesSidebar {
+                NavigationSplitView(columnVisibility: $visibility) {
+                    List(selection: $selection) {
+                        Section("Apple Music") {
+                            ForEach([RemoteSection.songs, .albums, .artists, .playlists]) { item in
+                                NavigationLink(value: item) { Label(item.title, systemImage: item.symbol) }
+                            }
+                        }
+                        Section("这台 Mac") {
+                            ForEach([RemoteSection.macLibrary, .player, .connection]) { item in
+                                NavigationLink(value: item) { Label(item.title, systemImage: item.symbol) }
+                            }
+                        }
+                        Section {
+                            Label(remote.connected ? "已连接 Mac" : "尚未连接", systemImage: remote.connected ? "checkmark.circle.fill" : "wifi.slash")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    .listStyle(.sidebar)
+                    .navigationTitle("音乐遥控")
+                    .navigationSplitViewColumnWidth(min: 210, ideal: 250, max: 300)
+                } detail: {
+                    detail
+                        .safeAreaInset(edge: .bottom, spacing: 0) {
+                            if selection != .player {
+                                TabletPlaybackBar { selection = .player }
+                            }
+                        }
+                }
+                .navigationSplitViewStyle(.balanced)
+            } else {
+                TabView(selection: compactSelection) {
+                    LibraryView(category: selection?.category ?? "Songs").tabItem { Label("资料库", systemImage: "music.note.house") }.tag(0)
+                    MacLibraryView().tabItem { Label("Mac 资料库", systemImage: "desktopcomputer") }.tag(1)
+                    PlayerView().tabItem { Label("正在播放", systemImage: "play.circle.fill") }.tag(2)
+                    ConnectionView(key: $pairingCode).tabItem { Label("连接", systemImage: "wifi") }.tag(3)
+                }
+            }
+        }
+    }
+    @ViewBuilder private var detail: some View {
+        switch selection ?? .connection {
+        case .songs, .albums, .artists, .playlists:
+            LibraryView(category: (selection ?? .songs).category, showsCategoryPicker: false)
+                .id(selection)
+        case .macLibrary: MacLibraryView()
+        case .player: PlayerView()
+        case .connection: ConnectionView(key: $pairingCode)
+        }
+    }
+}
+
+struct TabletPlaybackBar: View {
+    @EnvironmentObject var remote: RemoteClient
+    var showPlayer: () -> Void
+    var body: some View {
+        HStack(spacing: 16) {
+            Button(action: showPlayer) {
+                HStack(spacing: 12) {
+                    Image(systemName: "hifispeaker.fill").font(.title2).frame(width: 44, height: 44)
+                        .background(.pink.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(remote.playback.title).font(.headline).lineLimit(1)
+                        Text(remote.connected ? remote.playback.artist : "先连接 Mac，再选择音乐")
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+            }.buttonStyle(.plain).accessibilityLabel("打开正在播放：\(remote.playback.title)")
+            Button { remote.command(remote.playback.playing ? "pause" : "play") } label: {
+                Image(systemName: remote.playback.playing ? "pause.fill" : "play.fill")
+                    .font(.title2).frame(width: 44, height: 44)
+            }.accessibilityLabel(remote.playback.playing ? "暂停" : "播放")
+                .disabled(!remote.connected || remote.busy)
+            Button { remote.command("next") } label: {
+                Image(systemName: "forward.end.fill").font(.title2).frame(width: 44, height: 44)
+            }.accessibilityLabel("下一首").disabled(!remote.connected || remote.busy)
+        }.padding(.horizontal, 20).padding(.vertical, 12)
+            .background(.regularMaterial)
+            .overlay(alignment: .top) { Divider() }
+    }
+}
+
 struct ConnectionView: View {
     @EnvironmentObject var remote: RemoteClient
-    @State private var key = ""
+    @Binding var key: String
     var body: some View {
         NavigationStack {
             Form {
@@ -54,7 +199,12 @@ struct LibraryView: View {
     @EnvironmentObject var remote: RemoteClient
     @EnvironmentObject var library: LibraryStore
     @State private var search = ""
-    @State private var category = "Songs"
+    @State private var category: String
+    var showsCategoryPicker: Bool
+    init(category: String = "Songs", showsCategoryPicker: Bool = true) {
+        _category = State(initialValue: category)
+        self.showsCategoryPicker = showsCategoryPicker
+    }
     private let categories = ["Songs", "Albums", "Artists", "Playlists"]
     private func categoryTitle(_ value: String) -> String {
         switch value {
@@ -79,7 +229,9 @@ struct LibraryView: View {
                     Text(remote.message).font(.caption).foregroundStyle(.secondary)
                     if library.loading { ProgressView() }
                     Button(library.authorized ? "重新加载资料库" : "允许访问 Apple Music") { Task { await library.load() } }.disabled(library.loading)
-                    Picker("浏览分类", selection: $category) { ForEach(categories, id: \.self) { Text(categoryTitle($0)).tag($0) } }.pickerStyle(.menu)
+                    if showsCategoryPicker {
+                        Picker("浏览分类", selection: $category) { ForEach(categories, id: \.self) { Text(categoryTitle($0)).tag($0) } }.pickerStyle(.menu)
+                    }
                 }
                 if category == "Songs" {
                     ForEach(songs) { SongRow(song: $0) }
@@ -94,7 +246,7 @@ struct LibraryView: View {
                         } label: { Label(group.0, systemImage: category == "Artists" ? "person.fill" : "square.stack.fill") }
                     }
                 }
-            }.navigationTitle("我的资料库").searchable(text: $search, prompt: "搜索资料库")
+            }.navigationTitle(showsCategoryPicker ? "我的资料库" : categoryTitle(category)).searchable(text: $search, prompt: "搜索资料库")
         }
     }
 }
@@ -162,8 +314,8 @@ struct PlayerView: View {
     @State private var changingVolume = false
     var body: some View {
         NavigationStack {
-            VStack(spacing: 24) {
-                Spacer()
+            ScrollView {
+              VStack(spacing: 24) {
                 Image(systemName: "hifispeaker.fill").font(.system(size: 100)).foregroundStyle(.pink.gradient)
                 Text(remote.playback.title).font(.title2.bold()).multilineTextAlignment(.center)
                 Text(remote.playback.artist).foregroundStyle(.secondary)
@@ -188,8 +340,9 @@ struct PlayerView: View {
                     Image(systemName: "speaker.wave.3.fill")
                 }
                 Text("由 Mac 的“音乐”应用播放").font(.caption).foregroundStyle(.secondary)
-                Spacer()
-            }.padding(28).disabled(!remote.connected)
+              }.padding(28).frame(maxWidth: 560)
+                .frame(maxWidth: .infinity)
+            }.disabled(!remote.connected)
                 .safeAreaInset(edge: .bottom) { Text(remote.message).font(.caption).padding().textSelection(.enabled) }
                 .navigationTitle("正在播放")
                 .onReceive(remote.$playback) { state in

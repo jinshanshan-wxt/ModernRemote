@@ -58,7 +58,7 @@ This produces a locally ad-hoc signed app for the current CPU architecture. It i
 
 ## Build and release status
 
-Release v0.1.1 is an early MVP, with Simplified Chinese UI and four-digit pairing.
+Release v0.2.0 is an early MVP, with Simplified Chinese UI and four-digit pairing.
 
 - Native Mac Release and iPhoneOS Release builds compile using Xcode 26.3.
 - The iOS Simulator build launches on iPhone 17 Pro Max (iOS 26.3). Bonjour discovery and TLS pairing with a real Mac companion were verified before the four-digit revision.
@@ -104,3 +104,11 @@ Source and machine-readable project files use UTF-8 as expected by Xcode. The Ch
 Four-digit pairing revision: the Mac displays four large digits; iPhone uses a visible four-character numeric field and number pad, and enables device selection only after four digits are entered. Tests include leading zeros, malformed input, non-repeating code rotation, cooldown, encrypted round-trip and wrong-code rejection.
 
 Version 0.1.1 adds the custom music-and-wireless app icon to iPhone, iPad and Mac builds, including the standalone Mac script. Icon declarations and compiled resources were verified inside both Release app bundles.
+
+## iPad layout (v0.2.0)
+
+On regular-width iPad windows, NavigationSplitView provides a sidebar for Songs, Albums, Artists, Playlists, Mac Library, Now Playing and Connect. Library pages keep a bottom playback bar, allowing playback controls without leaving the list. The full player has a bounded width and scrolls on short windows. Narrow windows use the compact tab layout; connection input and selected destination live above the adaptive layout. iPhone continues to use tabs.
+
+The iPad Pro 13-inch simulator was visually checked in portrait and landscape. Opening the player from the bottom bar was verified. iPad multitasking window sizes, hardware-keyboard navigation, full accessibility and real-device playback are not yet exhaustively tested.
+
+![iPad landscape player](Docs/iPad-landscape.png)
