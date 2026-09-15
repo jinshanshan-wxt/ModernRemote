@@ -1,0 +1,5 @@
+# Modern Remote app icon
+
+Created with the built-in image_gen tool. Master: Icon-1024.png. Xcode assets include iPhone, iPad, App Store and Mac sizes. AppIcon.icns supports the standalone Mac build script. Resizing and format conversion use sips and iconutil.
+
+Prompt: Use case: logo-brand. Create the finished app icon artwork for Modern Remote, a refined iPhone remote controlling music playback on a Mac. Square 1024x1024 full-bleed opaque artwork, no outside margins, no rounded outer corners (OS applies the mask), no text. Vivid coral-red to deep raspberry smooth background matching the app's pink accent. Center a single distinctive pearly white sculpted musical eighth note, with two small curved broadcast arcs emerging toward its upper right, integrated into the same balanced symbol to suggest wireless music control. Bold, minimal, instantly readable at 32 pixels, generous internal breathing room, precise clean edges, gentle ceramic depth and subtle soft shadows, premium native app aesthetic. No Apple logo, no screenshot, no device mockup, no labels, no border. Return only the single square icon.

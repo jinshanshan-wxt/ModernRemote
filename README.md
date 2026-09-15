@@ -1,5 +1,7 @@
 # Modern Remote — MVP
 
+<img src="Assets/Icon-1024.png" width="128" alt="Modern Remote app icon">
+
 A native SwiftUI iPhone remote for **Music.app on your Mac**. No hosted server, account system, password collection, package dependencies, or audio forwarding.
 
 Open `ModernRemote.xcodeproj`. Shared schemes: **ModernRemoteMac** and **ModernRemoteiOS**. Requires iOS 17+, macOS 14+, and Xcode 16+ with the iOS SDK. Chinese setup instructions: `README.zh-CN.txt` (strict GBK).
@@ -56,7 +58,7 @@ This produces a locally ad-hoc signed app for the current CPU architecture. It i
 
 ## Build and release status
 
-Release v0.1.0 is an early MVP, with Simplified Chinese UI and four-digit pairing.
+Release v0.1.1 is an early MVP, with Simplified Chinese UI and four-digit pairing.
 
 - Native Mac Release and iPhoneOS Release builds compile using Xcode 26.3.
 - The iOS Simulator build launches on iPhone 17 Pro Max (iOS 26.3). Bonjour discovery and TLS pairing with a real Mac companion were verified before the four-digit revision.
@@ -100,3 +102,5 @@ Run the protocol/security checks with `./Scripts/test.sh`.
 Source and machine-readable project files use UTF-8 as expected by Xcode. The Chinese plain-text guide is GBK, checked with strict encoding and round-trip decoding.
 
 Four-digit pairing revision: the Mac displays four large digits; iPhone uses a visible four-character numeric field and number pad, and enables device selection only after four digits are entered. Tests include leading zeros, malformed input, non-repeating code rotation, cooldown, encrypted round-trip and wrong-code rejection.
+
+Version 0.1.1 adds the custom music-and-wireless app icon to iPhone, iPad and Mac builds, including the standalone Mac script. Icon declarations and compiled resources were verified inside both Release app bundles.
