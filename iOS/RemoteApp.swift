@@ -162,7 +162,7 @@ struct PadPlaybackBar: View {
             }.accessibilityLabel("循环播放")
             Button(action: showPlayer) {
                 HStack(spacing: 10) {
-                    MacArtwork(id: remote.playback.trackID, size: 44)
+                    MacArtwork(id: remote.playback.trackID, size: 44, retainPreviousImage: true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(remote.playback.title).font(.subheadline.weight(.medium)).lineLimit(1)
                         Text(remote.playback.artist).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
@@ -204,7 +204,7 @@ struct MiniPlayer: View {
         HStack(spacing: 12) {
             Button(action: showPlayer) {
                 HStack(spacing: 12) {
-                    MacArtwork(id: remote.playback.trackID, size: 40)
+                    MacArtwork(id: remote.playback.trackID, size: 40, retainPreviousImage: true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(remote.playback.title).font(.subheadline.weight(.medium)).lineLimit(1)
                         Text(remote.connected ? remote.playback.artist : "正在寻找 Mac")
@@ -678,11 +678,11 @@ struct TrackCollectionView: View {
                 HStack(alignment: sizeClass == .regular ? .bottom : .top, spacing: sizeClass == .regular ? 30 : 14) {
                     MacArtwork(id: tracks.first?.id, size: sizeClass == .regular ? 240 : 100)
                     information.frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(spacing: 12) {
+                        collectionButton("播放", symbol: "play.fill", shuffle: false)
+                        collectionButton("随机播放", symbol: "shuffle", shuffle: true)
+                    }
                 }.padding(.top, sizeClass == .regular ? 20 : 8)
-                HStack(spacing: 14) {
-                    collectionButton("播放", symbol: "play.fill", shuffle: false)
-                    collectionButton("随机播放", symbol: "shuffle", shuffle: true)
-                }.frame(maxWidth: sizeClass == .regular ? 420 : .infinity, alignment: .leading)
                 if loading { ProgressView("正在读取播放列表……") }
                 LazyVStack(spacing: 0) {
                     ForEach(Array(sorted.enumerated()), id: \.element.id) { index, track in
@@ -703,8 +703,9 @@ struct TrackCollectionView: View {
     }
     private func collectionButton(_ title: String, symbol: String, shuffle: Bool) -> some View {
         Button { remote.playQueue(sorted, shuffle: shuffle) } label: {
-            Label(title, systemImage: symbol).font(.body.weight(.semibold)).frame(maxWidth: .infinity).frame(height: 34)
-        }.buttonStyle(.bordered).tint(.accentColor)
+            Image(systemName: symbol).font(.system(size: 18, weight: .semibold))
+                .frame(width: 44, height: 44).background(.thinMaterial, in: Circle())
+        }.buttonStyle(.plain).tint(.accentColor).accessibilityLabel(title)
             .disabled(!remote.connected || tracks.isEmpty || loading)
     }
     private var information: some View {
@@ -784,6 +785,7 @@ struct PlayerView: View {
     @State private var seeking = false
     @State private var changingVolume = false
     @State private var showRoutes = false
+    @State private var backgroundImage: UIImage?
     var body: some View {
         GeometryReader { geometry in
             let wide = geometry.size.width > 700 && geometry.size.width > geometry.size.height
@@ -824,16 +826,23 @@ struct PlayerView: View {
         GeometryReader { geometry in
             ZStack {
                 Color(white: 0.12)
-                if let id = remote.playback.trackID, let data = remote.artwork[id], let image = UIImage(data: data) {
-                    Image(uiImage: image).resizable().scaledToFill().frame(width: geometry.size.width, height: geometry.size.height)
+                if let backgroundImage {
+                    Image(uiImage: backgroundImage).resizable().scaledToFill().frame(width: geometry.size.width, height: geometry.size.height)
                         .blur(radius: 90).opacity(0.55)
                 }
                 LinearGradient(colors: [.black.opacity(0.1), .black.opacity(0.5)], startPoint: .top, endPoint: .bottom)
             }.clipped()
-        }.ignoresSafeArea()
+        }.ignoresSafeArea().task(id: "\(remote.cacheEpoch):\(remote.playback.trackID ?? ""):\(remote.artwork[remote.playback.trackID ?? ""]?.count ?? -1)") {
+            guard let id = remote.playback.trackID else { backgroundImage = nil; return }
+            guard let data = remote.artwork[id] else { return }
+            guard !data.isEmpty else { backgroundImage = nil; return }
+            let image = await ArtworkImages.decode(data, key: "\(remote.cacheEpoch):\(id):\(data.count):background", pixels: 384)
+            guard !Task.isCancelled else { return }
+            backgroundImage = image
+        }
     }
     private func cover(size: CGFloat) -> some View {
-        MacArtwork(id: remote.playback.trackID, size: max(size, 120))
+        MacArtwork(id: remote.playback.trackID, size: max(size, 120), retainPreviousImage: true)
             .shadow(color: .black.opacity(0.35), radius: 24, y: 16)
     }
     private var controls: some View {
@@ -956,9 +965,13 @@ struct MacArtwork: View {
     @EnvironmentObject var remote: RemoteClient
     let id: String?
     let size: CGFloat
+    var retainPreviousImage = false
+    @Environment(\.displayScale) private var displayScale
+    @State private var decodedEpoch = -1
     @State private var decoded: UIImage?
     @State private var decodedNamespace = ""
-    private var imageKey: String { "\(remote.cacheEpoch):\(id ?? ""):\(remote.artwork[id ?? ""]?.count ?? 0)" }
+    private var pixels: Int { [128, 384, 768, 1536, 2048].first { CGFloat($0) >= size * displayScale } ?? 2048 }
+    private var imageKey: String { "\(remote.cacheEpoch):\(id ?? ""):\(remote.artwork[id ?? ""]?.count ?? -1):\(pixels)" }
     var body: some View {
         Group {
             if let decoded { Image(uiImage: decoded).resizable().scaledToFill() }
@@ -967,11 +980,15 @@ struct MacArtwork: View {
             .task(id: "\(remote.cacheEpoch):\(remote.connected):\(id ?? "")") { if let id { remote.loadArtwork(id) } }
             .task(id: imageKey) {
                 let namespace = "\(remote.cacheEpoch):\(id ?? "")"
-                if decodedNamespace != namespace { decoded = nil; decodedNamespace = namespace }
+                if decodedNamespace != namespace {
+                    if !retainPreviousImage || decodedEpoch != remote.cacheEpoch || id == nil { decoded = nil }
+                    decodedNamespace = namespace; decodedEpoch = remote.cacheEpoch
+                }
                 // Evicting compressed bytes must not blank a still-visible image.
-                guard let data = remote.artwork[id ?? ""], !data.isEmpty else { return }
+                guard let data = remote.artwork[id ?? ""] else { return }
+                guard !data.isEmpty else { decoded = nil; return }
                 let key = imageKey
-                let image = await ArtworkImages.decode(data, key: key)
+                let image = await ArtworkImages.decode(data, key: key, pixels: pixels)
                 guard !Task.isCancelled else { return }
                 decoded = image
             }

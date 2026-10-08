@@ -63,7 +63,21 @@ final class Companion: ObservableObject {
                     reply.tracks = page.0; reply.hasMore = page.1; reply.playlistID = request.playlistID
                     reply.cacheInfo = self.music.currentCacheInfo
                 } else if request.action == "artwork", let id = request.artworkID {
-                    reply.artworkID = id; reply.artwork = try self.music.artwork(id: id)
+                    reply.artworkID = id
+                    let data = try self.music.artwork(id: id) ?? Data()
+                    if let offset = request.offset {
+                        reply.artwork = try ArtworkTransfer.chunk(data, offset: offset)
+                        reply.offset = offset; reply.hasMore = offset + (reply.artwork?.count ?? 0) < data.count
+                    } else {
+                        // Older clients only accept a single bounded thumbnail.
+                        if let image = NSImage(data: data) {
+                            let small = NSImage(size: NSSize(width: 320, height: 320))
+                            small.lockFocus(); image.draw(in: NSRect(x: 0, y: 0, width: 320, height: 320)); small.unlockFocus()
+                            if let tiff = small.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff) {
+                                reply.artwork = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8])
+                            }
+                        }
+                    }
                 } else if request.action == "routes" {
                     reply.routes = try self.music.audioRoutes()
                 } else if request.action == "route", let id = request.routeID {

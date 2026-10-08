@@ -222,3 +222,27 @@ struct PlaybackSelection {
         ids = tracks.map(\.id); start = index
     }
 }
+
+
+// Large original covers travel in bounded chunks; only complete originals enter
+// the image cache. Offset checks reject missing, duplicated or reordered chunks.
+enum ArtworkTransfer {
+    static let chunkSize = 192 * 1024
+    static let maximum = 64 * 1024 * 1024
+    static func chunk(_ data: Data, offset: Int) throws -> Data {
+        guard data.count <= maximum, offset >= 0, offset <= data.count else {
+            throw NSError(domain: "ArtworkTransfer", code: 1, userInfo: [NSLocalizedDescriptionKey: "封面传输位置无效。"])
+        }
+        return data.subdata(in: offset..<min(data.count, offset + chunkSize))
+    }
+}
+struct ArtworkAssembly {
+    private(set) var data = Data()
+    mutating func append(_ bytes: Data, offset: Int, hasMore: Bool) throws -> Data? {
+        guard offset == data.count, bytes.count <= ArtworkTransfer.maximum - data.count, !hasMore || !bytes.isEmpty else {
+            throw NSError(domain: "ArtworkTransfer", code: 2, userInfo: [NSLocalizedDescriptionKey: "封面分块不完整。"])
+        }
+        data.append(bytes)
+        return hasMore ? nil : data
+    }
+}

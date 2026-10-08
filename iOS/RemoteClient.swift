@@ -16,6 +16,9 @@ final class RemoteClient: ObservableObject {
     @Published var routes: [AudioRoute] = []
     @Published var routeMessage = ""
     @Published var selectingRouteID: String? = nil
+    private var incomingArtwork: [String: ArtworkAssembly] = [:]
+    private var activePlaybackIDs: [String] = []
+    private var pendingEmptyPlayback: DispatchWorkItem?
     private var requestedArtwork: Set<String> = []
     @Published var playlists: [RemotePlaylist] = []
     @Published var playlistTracks: [String: [RemoteTrack]] = [:]
@@ -46,7 +49,7 @@ final class RemoteClient: ObservableObject {
     }
     private func selectCache(_ id: String) {
         if id != cacheID {
-            cacheEpoch += 1; cacheID = id; disk = LibraryDiskCache(namespace: "ios:" + id)
+            incomingArtwork = [:]; pendingEmptyPlayback?.cancel(); pendingEmptyPlayback = nil; cacheEpoch += 1; cacheID = id; disk = LibraryDiskCache(namespace: "ios:" + id)
             artwork = [:]; requestedArtwork = []; macTracks = []; playlists = []; playlistTracks = [:]; completedPlaylists = []
             cacheRevision = nil; cacheUpdatedAt = nil
             if let value = disk?.snapshot() {
@@ -63,7 +66,8 @@ final class RemoteClient: ObservableObject {
             playlists: playlists, playlistTracks: completeLists))
     }
     private func rememberArtwork(_ data: Data, id: String) {
-        guard !data.isEmpty else { return }
+        while artwork.values.reduce(0, { $0 + $1.count }) + data.count > 64 * 1024 * 1024,
+              let old = artwork.keys.first(where: { $0 != playback.trackID && $0 != id }) { artwork[old] = nil }
         if artwork.count >= 300, let old = artwork.keys.first(where: { $0 != playback.trackID }) { artwork[old] = nil }
         artwork[id] = data
     }
@@ -112,7 +116,7 @@ final class RemoteClient: ObservableObject {
         let knownHosts = UserDefaults.standard.dictionary(forKey: "cache.hosts") as? [String: String] ?? [:]
         if let id = knownHosts[name] { selectCache(id) }
         else {
-            cacheEpoch += 1; disk = nil; cacheID = ""; cacheRevision = nil; cacheUpdatedAt = nil
+            incomingArtwork = [:]; pendingEmptyPlayback?.cancel(); pendingEmptyPlayback = nil; cacheEpoch += 1; disk = nil; cacheID = ""; cacheRevision = nil; cacheUpdatedAt = nil
             macTracks = []; playlists = []; playlistTracks = [:]; completedPlaylists = []; artwork = [:]; requestedArtwork = []; hasMore = true
         }
         macName = name
@@ -174,15 +178,24 @@ final class RemoteClient: ObservableObject {
                 if let revision = info.revision { self.cacheRevision = revision; self.cacheUpdatedAt = info.updatedAt }
             }
             if let playback = packet.playback {
-                self.playback = playback
-                if let id = playback.trackID { self.loadArtwork(id) }
+                self.applyPlayback(playback)
             }
             if let id = packet.artworkID {
-                self.requestedArtwork.remove(id)
                 if packet.error == nil {
-                    let data = packet.artwork ?? Data()
-                    self.rememberArtwork(data, id: id); self.disk?.saveArtwork(data, id: id)
-                }
+                    do {
+                        var assembly = self.incomingArtwork[id] ?? ArtworkAssembly()
+                        let completed = try assembly.append(packet.artwork ?? Data(), offset: packet.offset ?? 0, hasMore: packet.hasMore == true)
+                        if let completed {
+                            self.incomingArtwork[id] = nil; self.requestedArtwork.remove(id)
+                            self.rememberArtwork(completed, id: id); self.disk?.saveArtwork(completed, id: id)
+                        } else {
+                            self.incomingArtwork[id] = assembly
+                            self.deferred.append(Packet(action: "artwork", offset: assembly.data.count, artworkID: id))
+                        }
+                    } catch {
+                        self.incomingArtwork[id] = nil; self.requestedArtwork.remove(id); self.message = error.localizedDescription
+                    }
+                } else { self.incomingArtwork[id] = nil; self.requestedArtwork.remove(id) }
             }
             if let routes = packet.routes {
                 self.routes = routes
@@ -227,7 +240,7 @@ final class RemoteClient: ObservableObject {
     }
     func reloadLibrary() {
         guard connected, !busy else { return }
-        disk?.clear(); artwork = [:]; requestedArtwork = []; cacheEpoch += 1
+        disk?.clear(); artwork = [:]; requestedArtwork = []; incomingArtwork = [:]; pendingEmptyPlayback?.cancel(); pendingEmptyPlayback = nil; cacheEpoch += 1
         startLibraryReload(refreshMac: true, clearArtwork: true)
     }
     private func startLibraryReload(refreshMac: Bool, clearArtwork: Bool) {
@@ -241,6 +254,25 @@ final class RemoteClient: ObservableObject {
         guard playlistTracks[id] == nil else { return }
         playlistTracks[id] = []
         send(Packet(action: "library", offset: 0, playlistID: id))
+    }
+    func applyPlayback(_ state: Playback) {
+        if state.trackID == nil, playback.trackID != nil {
+            guard pendingEmptyPlayback == nil else { return }
+            let update = DispatchWorkItem { [weak self] in
+                self?.playback = state; self?.pendingEmptyPlayback = nil
+            }
+            pendingEmptyPlayback = update
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5, execute: update)
+            return
+        }
+        pendingEmptyPlayback?.cancel(); pendingEmptyPlayback = nil
+        playback = state
+        if let id = state.trackID {
+            loadArtwork(id)
+            if let index = activePlaybackIDs.firstIndex(of: id), index + 1 < activePlaybackIDs.count {
+                loadArtwork(activePlaybackIDs[index + 1])
+            }
+        }
     }
     func loadRoutes() { routeMessage = "正在寻找音频输出……"; send(Packet(action: "routes")) }
     func selectRoute(_ id: String) {
@@ -256,11 +288,11 @@ final class RemoteClient: ObservableObject {
                 DispatchQueue.main.async {
                     guard let self, self.cacheEpoch == epoch else { return }
                     if let data { self.rememberArtwork(data, id: id); self.requestedArtwork.remove(id) }
-                    else if self.connected { self.send(Packet(action: "artwork", artworkID: id)) }
+                    else if self.connected { self.send(Packet(action: "artwork", offset: 0, artworkID: id)) }
                     else { self.requestedArtwork.remove(id) }
                 }
             }
-        } else if connected { send(Packet(action: "artwork", artworkID: id)) }
+        } else if connected { send(Packet(action: "artwork", offset: 0, artworkID: id)) }
         else { requestedArtwork.remove(id) }
     }
     func playQueue(_ tracks: [RemoteTrack], shuffle: Bool = false) {
@@ -281,11 +313,12 @@ final class RemoteClient: ObservableObject {
         guard let selection = PlaybackSelection(tracks: context ?? macTracks, selectedID: track.id) else {
             message = "这首歌曲不在当前播放列表中，请刷新资料库。"; return
         }
+        activePlaybackIDs = selection.ids
         send(Packet(action: "queue", value: shuffle ? 1 : 0, offset: selection.start, trackIDs: selection.ids))
     }
     func loadMacPage() { send(Packet(action: "library", offset: incomingTracks.count)) }
     func disconnect() {
-        cacheEpoch += 1; requestedArtwork = []
+        incomingArtwork = [:]; pendingEmptyPlayback?.cancel(); pendingEmptyPlayback = nil; cacheEpoch += 1; requestedArtwork = []
         wantsConnection = false; connecting = false
         timer = nil; timeout?.cancel(); wire?.close(); wire = nil
         selectingRouteID = nil; routes = []; routeMessage = ""

@@ -3,17 +3,17 @@ import UIKit
 import ImageIO
 
 // Decode once, away from the main thread. NSCache releases decoded pixels under
-// memory pressure; disk-cache JPEGs remain available across launches.
+// memory pressure; disk-cache originals remain available across launches.
 enum ArtworkImages {
     private static let images = NSCache<NSString, UIImage>()
-    static func decode(_ data: Data, key: String) async -> UIImage? {
+    static func decode(_ data: Data, key: String, pixels: Int = 768) async -> UIImage? {
         if let image = images.object(forKey: key as NSString) { return image }
         return await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .utility).async {
                 guard let source = CGImageSourceCreateWithData(data as CFData, nil),
                       let cg = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                         kCGImageSourceCreateThumbnailFromImageAlways: true,
-                        kCGImageSourceThumbnailMaxPixelSize: 640,
+                        kCGImageSourceThumbnailMaxPixelSize: pixels,
                         kCGImageSourceShouldCacheImmediately: true
                       ] as CFDictionary) else { continuation.resume(returning: nil); return }
                 let image = UIImage(cgImage: cg)

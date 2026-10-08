@@ -51,7 +51,7 @@ final class LibraryDiskCache {
     }
     func saveArtwork(_ data: Data, id: String) {
         queue.async {
-            let folder = self.directory.appendingPathComponent("Artwork", isDirectory: true)
+            let folder = self.directory.appendingPathComponent("ArtworkOriginal-v2", isDirectory: true)
             try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try? data.write(to: self.artworkURL(id), options: .atomic)
             self.artworkWrites += 1
@@ -69,7 +69,7 @@ final class LibraryDiskCache {
     }
     func flush() { queue.sync {} }
     private func artworkURL(_ id: String) -> URL {
-        directory.appendingPathComponent("Artwork", isDirectory: true).appendingPathComponent(Self.key(id) + ".jpg")
+        directory.appendingPathComponent("ArtworkOriginal-v2", isDirectory: true).appendingPathComponent(Self.key(id) + ".image")
     }
     private func trimArtwork(_ folder: URL) {
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]

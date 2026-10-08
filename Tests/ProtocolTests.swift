@@ -22,6 +22,24 @@ import Network
         first.save(cachedSnapshot); first.flush(); precondition(first.snapshot()?.revision == "r1")
         first.clear(); precondition(first.snapshot() == nil && first.artwork(cachedTrack.id) == nil)
         print("PASS: disk cache survives re-instantiation, isolates Mac/libraries, stores playlists and missing artwork, recovers corruption, clears safely")
+        let originalCover = Data((0..<2_500_000).map { UInt8($0 % 251) })
+        var assembled = ArtworkAssembly(); var coverOffset = 0
+        while coverOffset < originalCover.count {
+            let bytes = try ArtworkTransfer.chunk(originalCover, offset: coverOffset)
+            let more = coverOffset + bytes.count < originalCover.count
+            let frame = Packet(action: "reply", offset: coverOffset, hasMore: more, artworkID: "cover", artwork: bytes)
+            precondition(trySize(frame) < LineDecoder.maximum)
+            let frameRead = try JSONDecoder().decode(Packet.self, from: JSONEncoder().encode(frame))
+            let complete = try assembled.append(frameRead.artwork!, offset: frameRead.offset!, hasMore: more)
+            if !more { precondition(complete == originalCover) }
+            else { precondition(complete == nil) }
+            coverOffset += bytes.count
+        }
+        var missingCover = ArtworkAssembly()
+        precondition(tryEmptyArtwork(&missingCover))
+        do { _ = try assembled.append(Data([1]), offset: 0, hasMore: false); fatalError("Reordered artwork accepted") } catch {}
+        do { _ = try ArtworkTransfer.chunk(originalCover, offset: -1); fatalError("Negative artwork offset accepted") } catch {}
+        print("PASS: 2.5 MB original artwork round-trip, bounded frames, complete-only assembly, missing artwork and offset validation")
         let packet = Packet(action: "track", track: RemoteTrack(id: "id", title: "雪 / \"song\"\n", artist: "Artist", album: "Album", duration: 180))
         var data = try JSONEncoder().encode(packet); data.append(10)
         var decoder = LineDecoder()
@@ -91,6 +109,7 @@ import Network
         lanTest { print("PASS: all tests"); exit(0) }
         dispatchMain()
     }
+    static func tryEmptyArtwork(_ assembly: inout ArtworkAssembly) -> Bool { (try! assembly.append(Data(), offset: 0, hasMore: false)) == Data() }
     static func trySize(_ packet: Packet) -> Int { try! JSONEncoder().encode(packet).count }
     static func tryCount(_ decoder: inout LineDecoder, _ data: Data) -> Int { try! decoder.append(data).count }
     static var retained: [AnyObject] = []

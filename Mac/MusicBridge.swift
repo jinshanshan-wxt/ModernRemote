@@ -2,6 +2,7 @@ import Foundation
 import AppKit
 import CoreAudio
 import CryptoKit
+import ImageIO
 
 // NSAppleScript is executed serially on the main thread. Scripts consist only
 // of fixed commands plus escaped strings / validated numeric values.
@@ -177,7 +178,7 @@ final class MusicBridge {
         if disk == nil { _ = try cacheInfo() }
         if let cached = artworkCache[id] { return cached.isEmpty ? nil : cached }
         if let cached = disk?.artwork(id) {
-            if artworkCache.count >= 300 { artworkCache.removeAll() }
+            trimArtworkMemory(adding: cached.count)
             artworkCache[id] = cached; return cached.isEmpty ? nil : cached
         }
         let result = try run("""
@@ -185,16 +186,20 @@ final class MusicBridge {
         if (count of artworks of t) is 0 then return missing value
         return raw data of artwork 1 of t
         """)
-        guard let image = NSImage(data: result.data) else {
+        let data = result.data
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil), CGImageSourceGetCount(source) > 0 else {
             artworkCache[id] = Data(); disk?.saveArtwork(Data(), id: id); return nil
         }
-        let small = NSImage(size: NSSize(width: 320, height: 320))
-        small.lockFocus(); image.draw(in: NSRect(x: 0, y: 0, width: 320, height: 320)); small.unlockFocus()
-        guard let tiff = small.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
-              let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else { return nil }
-        if artworkCache.count >= 300 { artworkCache.removeAll() }
+        guard data.count <= ArtworkTransfer.maximum else { throw failure("封面文件超过 64 MB。") }
+        // Preserve Music's raw embedded artwork, including format and pixels.
+        trimArtworkMemory(adding: data.count)
         artworkCache[id] = data; disk?.saveArtwork(data, id: id)
         return data
+    }
+    private func trimArtworkMemory(adding bytes: Int) {
+        while !artworkCache.isEmpty && (artworkCache.count >= 300 || artworkCache.values.reduce(0, { $0 + $1.count }) + bytes > 64 * 1024 * 1024) {
+            artworkCache.removeValue(forKey: artworkCache.keys.first!)
+        }
     }
     private func playQueue(_ ids: [String], start: Int, shuffle: Bool) throws {
         guard !ids.isEmpty, ids.count <= 10000,
