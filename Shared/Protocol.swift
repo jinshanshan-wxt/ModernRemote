@@ -6,9 +6,18 @@ struct RemoteTrack: Codable, Identifiable, Hashable {
     var artist: String
     var album: String
     var duration: Double
+    var dateAdded: Double = 0
+    var genre: String = ""
+    var albumArtist: String = ""
+    var trackNumber: Int = 0
     var macID: String? = nil
 }
+struct RemotePlaylist: Codable, Identifiable {
+    var id: String
+    var name: String
+}
 struct Playback: Codable {
+    var trackID: String? = nil
     var title = "尚未播放"
     var artist = ""
     var playing = false
@@ -26,6 +35,11 @@ struct Packet: Codable {
     var tracks: [RemoteTrack]? = nil
     var hasMore: Bool? = nil
     var playback: Playback? = nil
+    var artworkID: String? = nil
+    var artwork: Data? = nil
+    var queue: [RemoteTrack]? = nil
+    var playlists: [RemotePlaylist]? = nil
+    var playlistID: String? = nil
     var error: String? = nil
 }
 struct LineDecoder {

@@ -4,6 +4,10 @@ import AppKit
 // NSAppleScript is executed serially on the main thread. Scripts consist only
 // of fixed commands plus escaped strings / validated numeric values.
 final class MusicBridge {
+    private var artworkCache: [String: Data] = [:]
+    private var remoteQueue: [RemoteTrack] = []
+    private var queuePlaylistID: String?
+
     static func quote(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
@@ -25,9 +29,9 @@ final class MusicBridge {
         set v to sound volume
         set s to player state as string
         if s is "stopped" then return {"尚未播放", "", s, 0, 0, v}
-        return {name of current track, artist of current track, s, player position, duration of current track, v}
+        return {name of current track, artist of current track, s, player position, duration of current track, v, persistent ID of current track}
         """)
-        return Playback(title: result.atIndex(1)?.stringValue ?? "", artist: result.atIndex(2)?.stringValue ?? "",
+        return Playback(trackID: result.atIndex(7)?.stringValue, title: result.atIndex(1)?.stringValue ?? "", artist: result.atIndex(2)?.stringValue ?? "",
                         playing: result.atIndex(3)?.stringValue == "playing",
                         position: number(result.atIndex(4)), duration: number(result.atIndex(5)), volume: number(result.atIndex(6)))
     }
@@ -35,38 +39,98 @@ final class MusicBridge {
         guard let item else { return 0 }
         return item.coerce(toDescriptorType: typeIEEE64BitFloatingPoint)?.doubleValue ?? 0
     }
-    func library(offset: Int) throws -> ([RemoteTrack], Bool) {
+    func library(offset: Int, playlistID: String? = nil) throws -> ([RemoteTrack], Bool) {
         guard offset >= 0 && offset <= 1_000_000 else { throw failure("资料库分页位置无效，请重新加载。") }
+        if let id = playlistID, !(id.count == 16 && id.allSatisfy({ $0.isHexDigit })) { throw failure("播放列表 ID 无效。") }
+        let source = playlistID.map { "(first user playlist whose persistent ID is \(Self.quote($0)))" } ?? "library playlist 1"
         let result = try run("""
-        set output to {}
-        tell library playlist 1
+        tell \(source)
             set total to count of tracks
             set lastIndex to \(offset + 200)
             if lastIndex > total then set lastIndex to total
-            if \(offset + 1) <= total then
-                repeat with i from \(offset + 1) to lastIndex
-                    set t to track i
-                    set end of output to {persistent ID of t, name of t, artist of t, album of t, duration of t}
-                end repeat
-            end if
+            if \(offset + 1) > total then return {{}, total}
+            set output to {persistent ID, name, artist, album, duration, genre, album artist, track number, date added} of tracks \(offset + 1) thru lastIndex
+            return {output, total}
         end tell
-        return {output, total}
         """)
-        let rows = result.atIndex(1)!
+        guard let columns = result.atIndex(1) else { throw failure("无法读取 Mac 资料库。") }
+        let count = columns.atIndex(1)?.numberOfItems ?? 0
         var tracks: [RemoteTrack] = []
-        if rows.numberOfItems > 0 {
-            for i in 1...rows.numberOfItems {
-                guard let row = rows.atIndex(i) else { continue }
-                let id = row.atIndex(1)?.stringValue ?? ""
-                tracks.append(RemoteTrack(id: id, title: row.atIndex(2)?.stringValue ?? "",
-                                          artist: row.atIndex(3)?.stringValue ?? "", album: row.atIndex(4)?.stringValue ?? "",
-                                          duration: number(row.atIndex(5)), macID: id))
+        if count > 0 {
+            for i in 1...count {
+                func field(_ column: Int) -> NSAppleEventDescriptor? { columns.atIndex(column)?.atIndex(i) }
+                let id = field(1)?.stringValue ?? ""
+                tracks.append(RemoteTrack(id: id, title: field(2)?.stringValue ?? "",
+                    artist: field(3)?.stringValue ?? "", album: field(4)?.stringValue ?? "",
+                    duration: number(field(5)), dateAdded: field(9)?.dateValue?.timeIntervalSince1970 ?? 0,
+                    genre: field(6)?.stringValue ?? "", albumArtist: field(7)?.stringValue ?? "",
+                    trackNumber: Int(field(8)?.int32Value ?? 0), macID: id))
             }
         }
         return (tracks, offset + tracks.count < Int(result.atIndex(2)?.int32Value ?? 0))
     }
+    func playlists() throws -> [RemotePlaylist] {
+        let rows = try run("""
+        set output to {}
+        repeat with p in user playlists
+            set end of output to {persistent ID of p, name of p}
+        end repeat
+        return output
+        """)
+        guard rows.numberOfItems > 0 else { return [] }
+        return (1...rows.numberOfItems).compactMap { i in
+            guard let row = rows.atIndex(i), let id = row.atIndex(1)?.stringValue else { return nil }
+            return RemotePlaylist(id: id, name: row.atIndex(2)?.stringValue ?? "")
+        }
+    }
+    func artwork(id: String) throws -> Data? {
+        guard id.count == 16, id.allSatisfy({ $0.isHexDigit }) else { throw failure("歌曲 ID 无效。") }
+        if let cached = artworkCache[id] { return cached }
+        let result = try run("""
+        set t to first track of library playlist 1 whose persistent ID is \(Self.quote(id))
+        if (count of artworks of t) is 0 then return missing value
+        return raw data of artwork 1 of t
+        """)
+        guard let image = NSImage(data: result.data) else { return nil }
+        let small = NSImage(size: NSSize(width: 320, height: 320))
+        small.lockFocus(); image.draw(in: NSRect(x: 0, y: 0, width: 320, height: 320)); small.unlockFocus()
+        guard let tiff = small.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+              let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else { return nil }
+        if artworkCache.count >= 300 { artworkCache.removeAll() }
+        artworkCache[id] = data
+        return data
+    }
+    func upcoming() throws -> [RemoteTrack]? {
+        guard let id = queuePlaylistID else { return nil }
+        let state = try run("""
+        if player state is stopped then return {"", "", true}
+        return {persistent ID of current playlist, persistent ID of current track, shuffle enabled}
+        """)
+        guard state.atIndex(1)?.stringValue == id, state.atIndex(3)?.booleanValue == false,
+              let current = state.atIndex(2)?.stringValue,
+              let index = remoteQueue.firstIndex(where: { $0.id == current }) else { return nil }
+        return Array(remoteQueue.dropFirst(index + 1))
+    }
+    private func playQueue(_ tracks: [RemoteTrack]) throws {
+        guard !tracks.isEmpty, tracks.count <= 1000,
+              tracks.allSatisfy({ $0.id.count == 16 && $0.id.allSatisfy({ $0.isHexDigit }) }) else { throw failure("队列最多支持 1000 首 Mac 歌曲。") }
+        // A dedicated native playlist lets Music advance naturally while the phone sleeps.
+        let ids = tracks.map { Self.quote($0.id) }.joined(separator: ",")
+        let result = try run("""
+        set p to make new user playlist with properties {name:"音乐遥控 · " & (current date as string)}
+        repeat with trackID in {\(ids)}
+            duplicate (first track of library playlist 1 whose persistent ID is (trackID as string)) to p
+        end repeat
+        set shuffle enabled to false
+        set song repeat to off
+        play p
+        return persistent ID of p
+        """)
+        queuePlaylistID = result.stringValue; remoteQueue = tracks
+    }
     func execute(_ packet: Packet) throws {
         switch packet.action {
+        case "queue": try playQueue(packet.tracks ?? [])
         case "play": _ = try run("play")
         case "pause": _ = try run("pause")
         case "previous": _ = try run("previous track")

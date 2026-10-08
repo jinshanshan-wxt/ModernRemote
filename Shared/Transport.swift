@@ -2,53 +2,14 @@ import Foundation
 import Network
 import Security
 
-// A four-digit pairing code is used as the TLS PSK for this personal-LAN MVP.
-// This deliberately favors convenience; it is not a high-entropy secret.
-// Never send the secret as an application-level message.
 enum SecureLAN {
     static let service = "_modernremote._tcp"
-    static func parameters(secret: String) -> NWParameters {
-        let tls = NWProtocolTLS.Options()
-        let key = Data(secret.utf8).withUnsafeBytes { DispatchData(bytes: $0) }
-        let identity = Data("ModernRemote-v1".utf8).withUnsafeBytes { DispatchData(bytes: $0) }
-        sec_protocol_options_add_pre_shared_key(tls.securityProtocolOptions,
-                                                key as __DispatchData, identity as __DispatchData)
-        sec_protocol_options_set_min_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
-        sec_protocol_options_set_max_tls_protocol_version(tls.securityProtocolOptions, .TLSv12)
-        sec_protocol_options_append_tls_ciphersuite(tls.securityProtocolOptions,
-                                                    tls_ciphersuite_t(rawValue: 0x00A8)!)
-        let parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+    static func parameters() -> NWParameters {
+        // Explicitly open LAN sharing: no account, pairing, or authentication.
+        let parameters = NWParameters.tcp
         parameters.includePeerToPeer = false
         return parameters
     }
-    static func newCode(excluding previous: String? = nil) -> String {
-        var code: String
-        repeat { code = String(format: "%04d", Int.random(in: 0...9999)) } while code == previous
-        return code
-    }
-    static func validSecret(_ secret: String) -> Bool {
-        secret.count == 4 && secret.utf8.allSatisfy { (48...57).contains($0) }
-    }
-}
-
-// Limit failed online handshakes. This cannot prevent offline guessing of a
-// short TLS PSK from a captured handshake; use only on a trusted personal LAN.
-struct PairingGate {
-    private var failures: [Date] = []
-    private(set) var lockedUntil: Date?
-    mutating func allowsAttempt(now: Date = Date()) -> Bool {
-        if let end = lockedUntil {
-            guard now >= end else { return false }
-            reset()
-        }
-        return true
-    }
-    mutating func failed(now: Date = Date()) {
-        failures.removeAll { now.timeIntervalSince($0) >= 60 }
-        failures.append(now)
-        if failures.count >= 5 { lockedUntil = now.addingTimeInterval(60) }
-    }
-    mutating func reset() { failures = []; lockedUntil = nil }
 }
 
 // All methods and callbacks run on the main queue. At most one outstanding
@@ -63,7 +24,7 @@ final class Wire {
     private var deadline: DispatchWorkItem?
     init(_ connection: NWConnection) { self.connection = connection }
     func start() {
-        let timeout = DispatchWorkItem { [weak self] in self?.close("连接超时，请检查配对码并重试。") }
+        let timeout = DispatchWorkItem { [weak self] in self?.close("连接超时，请检查 Mac 是否已开启共享。") }
         deadline = timeout
         DispatchQueue.main.asyncAfter(deadline: .now() + 15, execute: timeout)
         connection.stateUpdateHandler = { [weak self] state in

@@ -15,67 +15,43 @@ import Network
         var invalid = LineDecoder()
         do { _ = try invalid.append(Data("{\"version\":2,\"id\":\"1\",\"action\":\"status\"}\n".utf8)); fatalError("Unknown version accepted") }
         catch ProtocolError.version {} catch { fatalError("Wrong error") }
-        precondition(SecureLAN.validSecret("0386"))
-        precondition(SecureLAN.validSecret("0000"))
-        precondition(SecureLAN.validSecret("9999"))
-        for invalid in ["123", "12345", "１２３４", "1a23", " 123", "123\n"] {
-            precondition(!SecureLAN.validSecret(invalid))
-        }
-        for _ in 0..<1000 {
-            let code = SecureLAN.newCode(excluding: "0386")
-            precondition(SecureLAN.validSecret(code) && code != "0386")
-        }
-        var gate = PairingGate()
-        let start = Date(timeIntervalSince1970: 1000)
-        for index in 0..<5 {
-            precondition(gate.allowsAttempt(now: start.addingTimeInterval(Double(index))))
-            gate.failed(now: start.addingTimeInterval(Double(index)))
-        }
-        precondition(!gate.allowsAttempt(now: start.addingTimeInterval(63)))
-        precondition(gate.allowsAttempt(now: start.addingTimeInterval(64)))
-        gate.failed(now: start); gate.reset()
-        precondition(gate.allowsAttempt(now: start))
-        print("PASS: four digits, leading zeros, code rotation and failed-attempt cooldown")
-        precondition(!SecureLAN.validSecret("short"))
         precondition(MusicBridge.quote("a\"\\b\n") == "\"a\\\"\\\\b\\n\"")
-        print("PASS: fragmented/coalesced Unicode frames, size/version limits, key validation, escaping")
-        tlsTest(correct: true) { tlsTest(correct: false) { print("PASS: all tests"); exit(0) } }
+        print("PASS: fragmented/coalesced Unicode frames, size/version limits, escaping")
+        lanTest { print("PASS: all tests"); exit(0) }
         dispatchMain()
     }
     static func tryCount(_ decoder: inout LineDecoder, _ data: Data) -> Int { try! decoder.append(data).count }
     static var retained: [AnyObject] = []
-    static func tlsTest(correct: Bool, completion: @escaping () -> Void) {
-        let secret = "0386"
-        let listener = try! NWListener(using: SecureLAN.parameters(secret: secret), on: .any)
+    static func lanTest(completion: @escaping () -> Void) {
+        let listener = try! NWListener(using: SecureLAN.parameters(), on: .any)
         retained.append(listener)
-        var client: Wire?
-        var server: Wire?
-        var finished = false
-        func finish() {
-            guard !finished else { return }; finished = true
-            listener.cancel(); client?.close(); server?.close()
-            print(correct ? "PASS: TLS-PSK encrypted request/reply" : "PASS: wrong key rejected before command delivery")
-            DispatchQueue.main.async { completion() }
-        }
+        var peers: [Wire] = []
+        var replies = 0
+        var started = false
         listener.newConnectionHandler = { connection in
-            let peer = Wire(connection); server = peer
-            peer.onPacket = { packet in
-                precondition(correct, "Unauthorized message delivered")
-                peer.send(Packet(id: packet.id, action: "reply"))
-            }
+            let peer = Wire(connection); peers.append(peer)
+            peer.onPacket = { [weak peer] packet in peer?.send(Packet(id: packet.id, action: "reply")) }
             peer.start()
         }
         listener.stateUpdateHandler = { state in
-            guard case .ready = state, let port = listener.port else { return }
-            let peer = Wire(NWConnection(host: "127.0.0.1", port: port,
-                                         using: SecureLAN.parameters(secret: correct ? secret : "0387")))
-            client = peer
-            peer.onReady = { precondition(correct, "Wrong key authenticated"); peer.send(Packet(action: "status")) }
-            peer.onPacket = { packet in precondition(packet.action == "reply"); finish() }
-            peer.onClose = { _ in if !finished { precondition(!correct, "Valid connection failed"); finish() } }
-            peer.start()
+            guard case .ready = state, !started, let port = listener.port else { return }
+            started = true
+            for _ in 0..<2 {
+                let peer = Wire(NWConnection(host: "127.0.0.1", port: port, using: SecureLAN.parameters()))
+                peers.append(peer)
+                peer.onReady = { [weak peer] in peer?.send(Packet(action: "status")) }
+                peer.onPacket = { packet in
+                    precondition(packet.action == "reply"); replies += 1
+                    if replies == 2 {
+                        listener.cancel(); for p in peers { p.close() }
+                        print("PASS: two simultaneous LAN controllers, no pairing")
+                        completion()
+                    }
+                }
+                peer.start()
+            }
         }
         listener.start(queue: .main)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { if !finished { fatalError("TLS test timed out") } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 20) { if replies != 2 { fatalError("LAN test timed out") } }
     }
 }

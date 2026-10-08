@@ -20,8 +20,6 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
-	<key>NSAppleMusicUsageDescription</key>
-	<string>读取你的歌曲与播放列表，以便选择要在 Mac 上播放的音乐。</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_modernremote._tcp</string>
