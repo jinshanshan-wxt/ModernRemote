@@ -8,6 +8,7 @@ import CryptoKit
 final class MusicBridge {
     private var playbackIDs: [String] = []
     private var playbackPlaylistID: String?
+    private var playbackStart = 0
     private var airDeviceIDs: [String: String] = [:]
     private var localTrackIDs: Set<String>?
     private var artworkCache: [String: Data] = [:]
@@ -201,15 +202,16 @@ final class MusicBridge {
               ids.allSatisfy({ $0.count == 16 && $0.allSatisfy({ $0.isHexDigit }) }) else {
             throw failure("播放顺序或起始曲目无效，当前最多支持 10000 首。")
         }
-        // A track must be played through its playlist reference. Playing the
-        // library reference leaves Music's previous queue attached to Next.
-        if ids == playbackIDs, let playlistID = playbackPlaylistID {
+        // Music's play(track) still behaves like a single-item queue, even with
+        // a playlist reference and once=false. Play the playlist itself, with
+        // the selected track first and the remaining screen order after it.
+        if ids == playbackIDs, start == playbackStart, let playlistID = playbackPlaylistID {
             do {
                 _ = try run("""
                 set p to first user playlist whose persistent ID is \(Self.quote(playlistID))
                 set shuffle enabled to \(shuffle ? "true" : "false")
                 set song repeat to off
-                play track \(start + 1) of p
+                play p once false
                 set shuffle enabled to \(shuffle ? "true" : "false")
                 """)
                 return
@@ -222,7 +224,7 @@ final class MusicBridge {
         for index in 1...max(1, libraryIDs.numberOfItems) {
             if let id = libraryIDs.atIndex(index)?.stringValue { positions[id] = index }
         }
-        let indices = try ids.map { id -> Int in
+        let indices = try ids.dropFirst(start).map { id -> Int in
             guard let index = positions[id] else { throw failure("曲库中的歌曲已变更，请刷新资料库。") }
             return index
         }.map(String.init).joined(separator: ",")
@@ -233,11 +235,11 @@ final class MusicBridge {
         end repeat
         set shuffle enabled to \(shuffle ? "true" : "false")
         set song repeat to off
-        play track \(start + 1) of p
+        play p once false
         set shuffle enabled to \(shuffle ? "true" : "false")
         return persistent ID of p
         """)
-        playbackIDs = ids; playbackPlaylistID = result.stringValue
+        playbackIDs = ids; playbackStart = start; playbackPlaylistID = result.stringValue
     }
     func audioRoutes() throws -> [AudioRoute] {
         let result = try run("""
@@ -310,7 +312,12 @@ final class MusicBridge {
         case "play": _ = try run("play")
         case "pause": _ = try run("pause")
         case "stop": _ = try run("stop")
-        case "previous": _ = try run("previous track")
+        case "previous":
+            let current = try status()
+            if current.shuffle != true, current.position < 3, playbackStart > 0,
+               playbackIDs.indices.contains(playbackStart), current.trackID == playbackIDs[playbackStart] {
+                try playQueue(playbackIDs, start: playbackStart - 1, shuffle: false)
+            } else { _ = try run("previous track") }
         case "next": _ = try run("next track")
         case "seek":
             guard let value = packet.value, value.isFinite, value >= 0 else { throw failure("播放进度无效。") }
