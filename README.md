@@ -1,4 +1,4 @@
-# Modern Remote 0.4.1
+# Modern Remote 0.4.2
 
 <img src="Assets/Mac-Icon-1024.png" width="128" alt="Modern Remote Mac icon">
 
