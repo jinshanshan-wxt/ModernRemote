@@ -1,4 +1,4 @@
-# Modern Remote 0.5.1
+# Modern Remote 0.5.2
 
 <img src="Assets/Mac-Icon-1024.png" width="128" alt="Modern Remote Mac icon">
 
@@ -61,3 +61,5 @@ Both native Release targets and the iOS Simulator target compile with Xcode 26.3
 - Missing artwork: refresh the library and verify Music itself exposes artwork for the track.
 - Cloud track unavailable: Music.app must have the required account/subscription and network access to play it.
 - Missing AirPlay destination: confirm it is visible and available in Mac Music, then refresh the output picker. Local output selection changes system audio, including other apps.
+
+The Mac companion lives in the menu bar, without a Dock icon or launch window. Sharing starts automatically on launch. Click the menu bar play icon for status, connection addresses, start/stop sharing, or Quit.

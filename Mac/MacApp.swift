@@ -10,6 +10,9 @@ final class Companion: ObservableObject {
     private var listener: NWListener?
     private var peers: [UUID: Wire] = [:]
     private let music = MusicBridge()
+    init() {
+        DispatchQueue.main.async { [weak self] in self?.start() }
+    }
     func start() {
         guard listener == nil else { return }
         do {
@@ -87,28 +90,39 @@ final class Companion: ObservableObject {
         }
     }
     var body: some Scene {
-        WindowGroup("音乐遥控 · Mac") {
-            VStack(alignment: .leading, spacing: 20) {
-                Label("音乐遥控", systemImage: "hifispeaker.fill").font(.largeTitle.bold())
-                Text("用 iPhone 选歌，让 Mac 播放。").foregroundStyle(.secondary)
-                Label(model.message, systemImage: model.connected ? "desktopcomputer" : "wifi")
-                    .textSelection(.enabled)
+        MenuBarExtra("音乐遥控", systemImage: "play.circle") {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack {
+                    Text("音乐遥控").font(.headline)
+                    Spacer()
+                    Circle().fill(model.running ? Color.green : Color.secondary).frame(width: 8, height: 8)
+                }
+                Text(model.message).font(.callout).textSelection(.enabled)
                 if model.running {
-                    Text("同一局域网中的 iPhone 和 iPad 可以直接连接，无需配对。")
-                    Text(model.connectionHint).font(.caption.monospaced()).textSelection(.enabled)
-                    Text("开启共享时，局域网内的设备均可浏览资料库和控制播放。")
+                    Text("同一 Wi-Fi 下可直接连接 iPhone 和 iPad。")
                         .font(.caption).foregroundStyle(.secondary)
+                    Text(model.connectionHint).font(.caption.monospaced()).textSelection(.enabled)
+                }
+                if !model.playback.title.isEmpty {
+                    Divider()
+                    Text(model.playback.title).font(.headline).lineLimit(2)
+                    Text(model.playback.artist).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Divider()
-                Text(model.playback.title).font(.title2)
-                Text(model.playback.artist).foregroundStyle(.secondary)
-                Button(model.running ? "停止共享" : "开启共享") {
-                    if model.running { model.stop() } else { model.start() }
-                }.buttonStyle(.borderedProminent)
-                Text("请确认 Mac 的“音乐”应用可以正常播放。系统询问时，请允许本应用通过自动化控制“音乐”。")
+                HStack {
+                    Button(model.running ? "停止共享" : "开启共享") {
+                        if model.running { model.stop() } else { model.start() }
+                    }.buttonStyle(.borderedProminent)
+                    Spacer()
+                    Button("退出") {
+                        model.stop()
+                        NSApplication.shared.terminate(nil)
+                    }.keyboardShortcut("q")
+                }
+                Text("请允许自动化控制 Mac 的“音乐”应用。")
                     .font(.caption).foregroundStyle(.secondary)
-            }.padding(30).frame(width: 520)
+            }.padding(18).frame(width: 340)
                 .environment(\.locale, Locale(identifier: "zh_Hans"))
-        }
+        }.menuBarExtraStyle(.window)
     }
 }
