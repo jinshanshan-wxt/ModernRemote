@@ -1,4 +1,4 @@
-音乐遥控 0.4.0
+音乐遥控 0.4.1
 
 使用方式
 用 Xcode 打开 ModernRemote.xcodeproj，选择 ModernRemoteMac 或 ModernRemoteiOS。最低支持 macOS 14、iOS/iPadOS 17。真机安装自行选择签名团队；发布包中的 IPA 未签名，可用自己的证书签名。
