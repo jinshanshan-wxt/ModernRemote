@@ -58,6 +58,7 @@ struct Packet: Codable {
     var value: Double? = nil
     var offset: Int? = nil
     var tracks: [RemoteTrack]? = nil
+    var trackIDs: [String]? = nil
     var hasMore: Bool? = nil
     var playback: Playback? = nil
     var artworkID: String? = nil
@@ -175,5 +176,49 @@ struct RequestQueue {
         let background = Set(["library", "artwork", "playlists"])
         let index = packets.firstIndex { !background.contains($0.action) } ?? 0
         return packets.remove(at: index)
+    }
+}
+
+struct QuickScrollTarget {
+    let id: String
+    let title: String
+    let label: String
+    init(id: String, title: String) {
+        self.id = id; self.title = title
+        // Chinese names use their pinyin initial; numbers and punctuation use #.
+        let latin = title.applyingTransform(.toLatin, reverse: false)?
+            .folding(options: [.diacriticInsensitive], locale: Locale(identifier: "zh_CN")) ?? title
+        let initial = latin.trimmingCharacters(in: .whitespaces).uppercased().prefix(1)
+        label = initial.first.map { $0.isASCII && $0.isLetter ? String($0) : "#" } ?? "#"
+    }
+}
+enum LibraryNavigation {
+    static func albumsInGenre(_ library: [RemoteTrack], genre: String) -> [RemoteTrack] {
+        func key(_ track: RemoteTrack) -> String { track.album + "\u{0}" + (track.albumArtist.isEmpty ? track.artist : track.albumArtist) }
+        let albums = Set(library.filter { ($0.genre.isEmpty ? "未分类" : $0.genre) == genre }.map(key))
+        return library.filter { albums.contains(key($0)) }
+    }
+    static func position(_ fraction: Double, count: Int) -> Int {
+        guard count > 0, fraction.isFinite else { return 0 }
+        return min(count - 1, max(0, Int((min(1, max(0, fraction)) * Double(count - 1)).rounded())))
+    }
+    static func albumTracks(_ tracks: [RemoteTrack], playlist: Bool = false) -> [RemoteTrack] {
+        if playlist { return tracks }
+        return tracks.sorted {
+            if $0.album != $1.album { return $0.album.localizedStandardCompare($1.album) == .orderedAscending }
+            if $0.discNumber != $1.discNumber { return ($0.discNumber ?? 1) < ($1.discNumber ?? 1) }
+            if $0.trackNumber != $1.trackNumber { return $0.trackNumber < $1.trackNumber }
+            return $0.id < $1.id
+        }
+    }
+}
+
+
+struct PlaybackSelection {
+    let ids: [String]
+    let start: Int
+    init?(tracks: [RemoteTrack], selectedID: String) {
+        guard let index = tracks.firstIndex(where: { $0.id == selectedID }) else { return nil }
+        ids = tracks.map(\.id); start = index
     }
 }

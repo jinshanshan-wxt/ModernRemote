@@ -16,7 +16,9 @@ final class Companion: ObservableObject {
     func start() {
         guard listener == nil else { return }
         do {
-            _ = try music.status() // Trigger Automation permission locally, before advertising.
+            // Advertise immediately. Music automation runs after app startup,
+            // on the first request, so a permission prompt or busy Music app
+            // cannot block LAN discovery during MenuBarExtra initialization.
             let listener = try NWListener(using: SecureLAN.parameters())
             self.listener = listener
             listener.service = NWListener.Service(name: Host.current().localizedName ?? "Mac", type: SecureLAN.service)

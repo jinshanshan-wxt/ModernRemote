@@ -319,7 +319,7 @@ struct LibrarySearchView: View {
             if term.isEmpty {
                 ContentUnavailableView("搜索", systemImage: "magnifyingglass", description: Text("歌曲、艺人、专辑和播放列表"))
             } else {
-                if !songs.isEmpty { Section("歌曲") { ForEach(songs) { MacTrackRow(track: $0, showArtwork: false) } } }
+                if !songs.isEmpty { Section("歌曲") { ForEach(songs) { MacTrackRow(track: $0, showArtwork: false, playbackContext: songs) } } }
                 if !albums.isEmpty {
                     Section("专辑") { ForEach(albums, id: \.0) { album in
                         NavigationLink { TrackCollectionView(title: album.0, tracks: album.1) } label: {
@@ -454,28 +454,37 @@ struct LibraryView: View {
     private var title: String {
         ["Recent": "最近添加", "Songs": "歌曲", "Albums": "专辑", "Artists": "艺人", "Playlists": "播放列表", "Genres": "类型"][category] ?? category
     }
-    private var songs: [RemoteTrack] {
-        remote.macTracks.filter { track in
-            (search.isEmpty || "\(track.title) \(track.artist) \(track.album) \(track.genre)".localizedCaseInsensitiveContains(search)) &&
-            (!favoritesOnly || ((category == "Albums" || category == "Recent") ? track.albumFavorite == true : category == "Artists" ? true : track.favorite == true))
-        }.sorted { LibrarySorting.less([$0], [$1], order: order, descending: descending, context: "Songs") }
-    }
-    private var groups: [(String, [RemoteTrack])] {
-        Dictionary(grouping: (category == "Albums" || category == "Recent") ? remote.macTracks : songs) { t in
-            switch category {
-            case "Artists": return t.artist.isEmpty ? "未知艺人" : t.artist
-            case "Genres": return t.genre.isEmpty ? "未分类" : t.genre
-            default: return albumKey(t)
-            }
-        }.map { ($0.key, $0.value) }.filter { group in
-            guard category == "Albums" || category == "Recent" else { return true }
-            return (search.isEmpty || group.1.contains { "\($0.title) \($0.artist) \($0.album)".localizedCaseInsensitiveContains(search) }) &&
-                (!favoritesOnly || group.1.contains { $0.albumFavorite == true })
-        }.sorted {
-            LibrarySorting.less($0.1, $1.1, order: order, descending: descending, context: category, leftTitle: $0.0, rightTitle: $1.0)
-        }
+    @State private var songs: [RemoteTrack] = []
+    @State private var groups: [(String, [RemoteTrack])] = []
+    @State private var scrollTargets: [QuickScrollTarget] = []
+    private var indexKey: String { "\(remote.libraryGeneration):\(category):\(sortRaw):\(descending):\(favoritesOnly):\(search)" }
+    private func rebuildIndex() async {
+        let tracks = remote.macTracks, category = category, search = search
+        let favorites = favoritesOnly, order = order, descending = descending
+        let result = await Task.detached(priority: .userInitiated) {
+            let songs = tracks.filter { track in
+                (search.isEmpty || "\(track.title) \(track.artist) \(track.album) \(track.genre)".localizedCaseInsensitiveContains(search)) &&
+                (!favorites || ((category == "Albums" || category == "Recent") ? track.albumFavorite == true : category == "Artists" ? true : track.favorite == true))
+            }.sorted { LibrarySorting.less([$0], [$1], order: order, descending: descending, context: "Songs") }
+            let groups: [(String, [RemoteTrack])] = Dictionary(grouping: (category == "Albums" || category == "Recent") ? tracks : songs) { t in
+                switch category {
+                case "Artists": return t.artist.isEmpty ? "未知艺人" : t.artist
+                case "Genres": return t.genre.isEmpty ? "未分类" : t.genre
+                default: return albumKey(t)
+                }
+            }.map { ($0.key, $0.value) }.filter { group in
+                guard category == "Albums" || category == "Recent" else { return true }
+                return (search.isEmpty || group.1.contains { "\($0.title) \($0.artist) \($0.album)".localizedCaseInsensitiveContains(search) }) &&
+                    (!favorites || group.1.contains { $0.albumFavorite == true })
+            }.sorted { LibrarySorting.less($0.1, $1.1, order: order, descending: descending, context: category, leftTitle: $0.0, rightTitle: $1.0) }
+            let targets = category == "Songs" ? songs.map { QuickScrollTarget(id: $0.id, title: $0.title) } : groups.map { QuickScrollTarget(id: $0.0, title: $0.0) }
+            return (songs, groups, targets)
+        }.value
+        guard !Task.isCancelled else { return }
+        songs = result.0; groups = result.1; scrollTargets = result.2
     }
     var body: some View {
+        ScrollViewReader { proxy in
         Group {
             if category == "Recent" || (category == "Albums" && gridLayout) {
                 ScrollView {
@@ -484,7 +493,7 @@ struct LibraryView: View {
                         ForEach(groups, id: \.0) { group in
                             NavigationLink { TrackCollectionView(title: group.0, tracks: group.1) } label: {
                                 AlbumTile(tracks: group.1, showArtist: showArtist)
-                            }.buttonStyle(.plain)
+                            }.buttonStyle(.plain).id(group.0)
                         }
                     }.padding(.horizontal, 20).padding(.bottom, 20)
                 }
@@ -493,8 +502,8 @@ struct LibraryView: View {
                     if remote.loadingLibrary || !remote.connected { loading.listRowSeparator(.hidden) }
                     if category == "Songs" {
                         ForEach(songs) { track in
-                            MacTrackRow(track: track, showArtwork: false, showArtist: showArtist, showAlbum: showAlbum, showDuration: showDuration, showRating: showRating)
-                                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                            MacTrackRow(track: track, showArtwork: false, showArtist: showArtist, showAlbum: showAlbum, showDuration: showDuration, showRating: showRating, playbackContext: songs)
+                                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 26)).id(track.id)
                         }
                     } else if category == "Playlists" {
                         ForEach(remote.playlists.filter { (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search)) && (!favoritesOnly || $0.favorite == true) }.sorted { descending ? $0.name > $1.name : $0.name < $1.name }) { list in
@@ -512,24 +521,34 @@ struct LibraryView: View {
                         ForEach(groups, id: \.0) { group in
                             NavigationLink {
                                 if category == "Artists" { ArtistAlbumsView(name: group.0, tracks: group.1) }
+                                else if category == "Genres" { GenreAlbumsView(name: group.0, tracks: LibraryNavigation.albumsInGenre(remote.macTracks, genre: group.0)) }
                                 else { TrackCollectionView(title: group.0, tracks: group.1) }
                             } label: {
                                 HStack(spacing: 14) {
-                                    if showArtwork, let first = group.1.first {
+                                    if category != "Genres", showArtwork, let first = group.1.first {
                                         MacArtwork(id: first.id, size: 56).clipShape(RoundedRectangle(cornerRadius: category == "Artists" ? 28 : 8))
                                     }
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(category == "Albums" ? (group.1.first?.album ?? "未知专辑") : group.0).font(.body)
                                         if category == "Albums" && showArtist { Text(group.1.first.map { $0.albumArtist.isEmpty ? $0.artist : $0.albumArtist } ?? "").font(.caption).foregroundStyle(.secondary) }
-                                        Text("\(group.1.count) 首歌曲").font(.caption).foregroundStyle(.secondary)
+                                        if category != "Genres" { Text("\(group.1.count) 首歌曲").font(.caption).foregroundStyle(.secondary) }
                                     }
                                 }.padding(.vertical, 4)
-                            }
+                            }.id(group.0)
                         }
                     }
                 }.listStyle(.plain).environment(\.defaultMinListRowHeight, 46)
             }
-        }.navigationTitle(title)
+        }.overlay(alignment: .trailing) {
+            if ["Songs", "Artists", "Albums", "Recent"].contains(category) {
+                QuickScrollRail(targets: scrollTargets) { id in
+                    var transaction = Transaction(); transaction.disablesAnimations = true
+                    withTransaction(transaction) { proxy.scrollTo(id, anchor: .top) }
+                }
+            }
+        }
+        }.task(id: indexKey) { await rebuildIndex() }
+        .navigationTitle(title)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -615,6 +634,35 @@ struct ArtistAlbumsView: View {
         }.navigationTitle(name)
     }
 }
+struct GenreAlbumsView: View {
+    let name: String
+    private let albums: [(String, [RemoteTrack])]
+    init(name: String, tracks: [RemoteTrack]) {
+        self.name = name
+        albums = Dictionary(grouping: tracks, by: albumKey).map { ($0.key, $0.value) }
+            .sorted { $0.0.localizedStandardCompare($1.0) == .orderedAscending }
+    }
+    var body: some View {
+        List {
+            ForEach(albums, id: \.0) { album in
+                NavigationLink { TrackCollectionView(title: album.0, tracks: album.1) } label: {
+                    HStack(spacing: 14) {
+                        MacArtwork(id: album.1.first?.id, size: 88)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(album.1.first?.album ?? "未知专辑").font(.body).lineLimit(2)
+                            if let track = album.1.first {
+                                Text([track.albumArtist.isEmpty ? track.artist : track.albumArtist,
+                                      (track.year ?? 0) > 0 ? String(track.year!) : ""].filter { !$0.isEmpty }.joined(separator: " · "))
+                                    .font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Text("\(album.1.count) 首歌曲").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.padding(.vertical, 4)
+                }
+            }
+        }.listStyle(.plain).navigationTitle(name)
+    }
+}
 struct TrackCollectionView: View {
     @EnvironmentObject var remote: RemoteClient
     @Environment(\.horizontalSizeClass) private var sizeClass
@@ -622,51 +670,52 @@ struct TrackCollectionView: View {
     let tracks: [RemoteTrack]
     var isPlaylist = false
     var loading = false
-    private var sorted: [RemoteTrack] {
-        if isPlaylist { return tracks }
-        return tracks.sorted {
-            if $0.album != $1.album { return $0.album < $1.album }
-            if $0.discNumber != $1.discNumber { return ($0.discNumber ?? 1) < ($1.discNumber ?? 1) }
-            return $0.trackNumber < $1.trackNumber
-        }
-    }
+    private var sorted: [RemoteTrack] { LibraryNavigation.albumTracks(tracks, playlist: isPlaylist) }
+    private var albumTitle: String { isPlaylist ? title : (tracks.first?.album.isEmpty == false ? tracks.first!.album : title) }
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                if sizeClass == .regular {
-                    HStack(alignment: .bottom, spacing: 30) {
-                        MacArtwork(id: tracks.first?.id, size: 240)
-                        information.frame(maxWidth: .infinity, alignment: .leading)
-                    }.padding(.vertical, 20)
-                } else {
-                    VStack(alignment: .leading, spacing: 24) {
-                        HStack { Spacer(); MacArtwork(id: tracks.first?.id, size: 240); Spacer() }
-                        information
-                    }.padding(.vertical, 12)
-                }
+            VStack(alignment: .leading, spacing: 20) {
+                HStack(alignment: sizeClass == .regular ? .bottom : .top, spacing: sizeClass == .regular ? 30 : 14) {
+                    MacArtwork(id: tracks.first?.id, size: sizeClass == .regular ? 240 : 100)
+                    information.frame(maxWidth: .infinity, alignment: .leading)
+                }.padding(.top, sizeClass == .regular ? 20 : 8)
+                HStack(spacing: 14) {
+                    collectionButton("播放", symbol: "play.fill", shuffle: false)
+                    collectionButton("随机播放", symbol: "shuffle", shuffle: true)
+                }.frame(maxWidth: sizeClass == .regular ? 420 : .infinity, alignment: .leading)
                 if loading { ProgressView("正在读取播放列表……") }
                 LazyVStack(spacing: 0) {
-                    ForEach(sorted) { track in
-                        MacTrackRow(track: track, showArtwork: isPlaylist, showArtist: isPlaylist, showAlbum: false, showDuration: true)
-                            .padding(.vertical, 3)
+                    ForEach(Array(sorted.enumerated()), id: \.element.id) { index, track in
+                        HStack(spacing: 10) {
+                            if !isPlaylist {
+                                Text("\(index + 1)").font(.system(size: 14).monospacedDigit()).foregroundStyle(.secondary)
+                                    .frame(width: 26, alignment: .leading)
+                            }
+                            MacTrackRow(track: track, showArtwork: isPlaylist, showArtist: isPlaylist, showAlbum: false, showDuration: true, playbackContext: sorted)
+                        }.padding(.vertical, 3)
                         Divider()
                     }
                 }
                 Text("\(tracks.count) 首歌曲 · \(Int(tracks.reduce(0) { $0 + $1.duration }) / 60) 分钟")
                     .font(.footnote).foregroundStyle(.secondary)
             }.padding(.horizontal, 24).padding(.bottom, sizeClass == .regular ? 110 : 24)
-        }.navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle(albumTitle).navigationBarTitleDisplayMode(.inline)
+    }
+    private func collectionButton(_ title: String, symbol: String, shuffle: Bool) -> some View {
+        Button { remote.playQueue(sorted, shuffle: shuffle) } label: {
+            Label(title, systemImage: symbol).font(.body.weight(.semibold)).frame(maxWidth: .infinity).frame(height: 34)
+        }.buttonStyle(.bordered).tint(.accentColor)
+            .disabled(!remote.connected || tracks.isEmpty || loading)
     }
     private var information: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(isPlaylist ? title : (tracks.first?.album.isEmpty == false ? tracks.first!.album : title)).font(.largeTitle.bold())
-            Text(isPlaylist ? "播放列表" : (tracks.first.map { $0.albumArtist.isEmpty ? $0.artist : $0.albumArtist } ?? "")).font(.title2).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(albumTitle).font(sizeClass == .regular ? .largeTitle.bold() : .headline).lineLimit(sizeClass == .regular ? 4 : 3)
+            Text(isPlaylist ? "播放列表" : (tracks.first.map { $0.albumArtist.isEmpty ? $0.artist : $0.albumArtist } ?? ""))
+                .font(sizeClass == .regular ? .title2 : .subheadline).foregroundStyle(.secondary)
             if !isPlaylist, let first = tracks.first {
                 Text([first.genre, (first.year ?? 0) > 0 ? String(first.year!) : ""].filter { !$0.isEmpty }.joined(separator: " · "))
                     .font(.subheadline).foregroundStyle(.secondary)
             }
-            Button { remote.playQueue(sorted) } label: { HStack(spacing: 8) { Image(systemName: "play.fill"); Text("播放") }.foregroundStyle(Color(uiColor: .systemBackground)).frame(width: 140, height: 28) }
-                .buttonStyle(.borderedProminent).tint(Color.primary).foregroundStyle(Color(uiColor: .systemBackground)).disabled(!remote.connected || sorted.isEmpty || loading).padding(.top, 8)
         }
     }
 }
@@ -679,8 +728,9 @@ struct MacTrackRow: View {
     var showAlbum = true
     var showDuration = false
     var showRating = false
+    var playbackContext: [RemoteTrack]? = nil
     var body: some View {
-        Button { remote.play(track) } label: {
+        Button { remote.play(track, in: playbackContext) } label: {
             GeometryReader { geometry in
                 let wide = sizeClass == .regular
                 let metadataWidth = geometry.size.width * (wide ? 0.48 : 0.44)
@@ -906,12 +956,24 @@ struct MacArtwork: View {
     @EnvironmentObject var remote: RemoteClient
     let id: String?
     let size: CGFloat
+    @State private var decoded: UIImage?
+    @State private var decodedNamespace = ""
+    private var imageKey: String { "\(remote.cacheEpoch):\(id ?? ""):\(remote.artwork[id ?? ""]?.count ?? 0)" }
     var body: some View {
         Group {
-            if let id, let data = remote.artwork[id], let image = UIImage(data: data) {
-                Image(uiImage: image).resizable().scaledToFill()
-            } else { Image(systemName: "music.note").resizable().scaledToFit().padding(size * 0.25).foregroundStyle(.pink).background(.quaternary) }
+            if let decoded { Image(uiImage: decoded).resizable().scaledToFill() }
+            else { Image(systemName: "music.note").resizable().scaledToFit().padding(size * 0.25).foregroundStyle(.pink).background(.quaternary) }
         }.frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: min(size * 0.025, 14)))
             .task(id: "\(remote.cacheEpoch):\(remote.connected):\(id ?? "")") { if let id { remote.loadArtwork(id) } }
+            .task(id: imageKey) {
+                let namespace = "\(remote.cacheEpoch):\(id ?? "")"
+                if decodedNamespace != namespace { decoded = nil; decodedNamespace = namespace }
+                // Evicting compressed bytes must not blank a still-visible image.
+                guard let data = remote.artwork[id ?? ""], !data.isEmpty else { return }
+                let key = imageKey
+                let image = await ArtworkImages.decode(data, key: key)
+                guard !Task.isCancelled else { return }
+                decoded = image
+            }
     }
 }

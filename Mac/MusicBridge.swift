@@ -6,6 +6,8 @@ import CryptoKit
 // NSAppleScript is executed serially on the main thread. Scripts consist only
 // of fixed commands plus escaped strings / validated numeric values.
 final class MusicBridge {
+    private var playbackIDs: [String] = []
+    private var playbackPlaylistID: String?
     private var airDeviceIDs: [String: String] = [:]
     private var localTrackIDs: Set<String>?
     private var artworkCache: [String: Data] = [:]
@@ -85,7 +87,7 @@ final class MusicBridge {
     }
     private func run(_ body: String) throws -> NSAppleEventDescriptor {
         var error: NSDictionary?
-        let result = NSAppleScript(source: "tell application \"Music\"\n\(body)\nend tell")!
+        let result = NSAppleScript(source: "tell application \"/System/Applications/Music.app\"\n\(body)\nend tell")!
             .executeAndReturnError(&error)
         if let error {
             throw NSError(domain: "MusicAutomation", code: error["NSAppleScriptErrorNumber"] as? Int ?? -1,
@@ -193,21 +195,49 @@ final class MusicBridge {
         artworkCache[id] = data; disk?.saveArtwork(data, id: id)
         return data
     }
-    private func playQueue(_ tracks: [RemoteTrack]) throws {
-        guard !tracks.isEmpty, tracks.count <= 1000,
-              tracks.allSatisfy({ $0.id.count == 16 && $0.id.allSatisfy({ $0.isHexDigit }) }) else { throw failure("队列最多支持 1000 首 Mac 歌曲。") }
-        // A dedicated native playlist lets Music advance naturally while the phone sleeps.
-        let ids = tracks.map { Self.quote($0.id) }.joined(separator: ",")
-        _ = try run("""
+    private func playQueue(_ ids: [String], start: Int, shuffle: Bool) throws {
+        guard !ids.isEmpty, ids.count <= 10000,
+              ids.indices.contains(start),
+              ids.allSatisfy({ $0.count == 16 && $0.allSatisfy({ $0.isHexDigit }) }) else {
+            throw failure("播放顺序或起始曲目无效，当前最多支持 10000 首。")
+        }
+        // A track must be played through its playlist reference. Playing the
+        // library reference leaves Music's previous queue attached to Next.
+        if ids == playbackIDs, let playlistID = playbackPlaylistID {
+            do {
+                _ = try run("""
+                set p to first user playlist whose persistent ID is \(Self.quote(playlistID))
+                set shuffle enabled to \(shuffle ? "true" : "false")
+                set song repeat to off
+                play track \(start + 1) of p
+                set shuffle enabled to \(shuffle ? "true" : "false")
+                """)
+                return
+            } catch { playbackIDs = []; playbackPlaylistID = nil }
+        }
+        // Bulk-read identifiers once and use direct track indices. Avoid one
+        // full-library 'whose persistent ID' search for each queue insertion.
+        let libraryIDs = try run("get persistent ID of every track of library playlist 1")
+        var positions: [String: Int] = [:]
+        for index in 1...max(1, libraryIDs.numberOfItems) {
+            if let id = libraryIDs.atIndex(index)?.stringValue { positions[id] = index }
+        }
+        let indices = try ids.map { id -> Int in
+            guard let index = positions[id] else { throw failure("曲库中的歌曲已变更，请刷新资料库。") }
+            return index
+        }.map(String.init).joined(separator: ",")
+        let result = try run("""
         set p to make new user playlist with properties {name:"音乐遥控 · " & (current date as string)}
-        repeat with trackID in {\(ids)}
-            duplicate (first track of library playlist 1 whose persistent ID is (trackID as string)) to p
+        repeat with trackIndex in {\(indices)}
+            duplicate (track (trackIndex as integer) of library playlist 1) to p
         end repeat
-        set shuffle enabled to false
+        set shuffle enabled to \(shuffle ? "true" : "false")
         set song repeat to off
-        play p
+        play track \(start + 1) of p
+        set shuffle enabled to \(shuffle ? "true" : "false")
         return persistent ID of p
         """)
+        playbackIDs = ids; playbackPlaylistID = result.stringValue
     }
     func audioRoutes() throws -> [AudioRoute] {
         let result = try run("""
@@ -276,9 +306,10 @@ final class MusicBridge {
         case "repeat":
             guard let value = packet.value, [0.0, 1.0, 2.0].contains(value) else { throw failure("循环播放设置无效。") }
             _ = try run("set song repeat to " + (value == 0 ? "off" : value == 1 ? "all" : "one"))
-        case "queue": try playQueue(packet.tracks ?? [])
+        case "queue": try playQueue(packet.trackIDs ?? (packet.tracks ?? []).map(\.id), start: packet.offset ?? 0, shuffle: packet.value == 1)
         case "play": _ = try run("play")
         case "pause": _ = try run("pause")
+        case "stop": _ = try run("stop")
         case "previous": _ = try run("previous track")
         case "next": _ = try run("next track")
         case "seek":

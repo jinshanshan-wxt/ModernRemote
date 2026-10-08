@@ -9,7 +9,8 @@ final class RemoteClient: ObservableObject {
     @Published var busy = false
     @Published var message = "请选择同一局域网中的 Mac。"
     @Published var playback = Playback()
-    @Published var macTracks: [RemoteTrack] = []
+    @Published private(set) var libraryGeneration = 0
+    @Published var macTracks: [RemoteTrack] = [] { didSet { libraryGeneration += 1 } }
     @Published var hasMore = true
     @Published var artwork: [String: Data] = [:]
     @Published var routes: [AudioRoute] = []
@@ -262,7 +263,10 @@ final class RemoteClient: ObservableObject {
         } else if connected { send(Packet(action: "artwork", artworkID: id)) }
         else { requestedArtwork.remove(id) }
     }
-    func playQueue(_ tracks: [RemoteTrack]) { send(Packet(action: "queue", tracks: tracks)) }
+    func playQueue(_ tracks: [RemoteTrack], shuffle: Bool = false) {
+        guard let first = tracks.first else { return }
+        play(first, in: tracks, shuffle: shuffle)
+    }
     func send(_ packet: Packet) {
         guard connected else { return }
         if busy { deferred.append(packet); return }
@@ -273,7 +277,12 @@ final class RemoteClient: ObservableObject {
         wire?.send(packet)
     }
     func command(_ action: String, value: Double? = nil) { send(Packet(action: action, value: value)) }
-    func play(_ track: RemoteTrack) { send(Packet(action: "track", track: track)) }
+    func play(_ track: RemoteTrack, in context: [RemoteTrack]? = nil, shuffle: Bool = false) {
+        guard let selection = PlaybackSelection(tracks: context ?? macTracks, selectedID: track.id) else {
+            message = "这首歌曲不在当前播放列表中，请刷新资料库。"; return
+        }
+        send(Packet(action: "queue", value: shuffle ? 1 : 0, offset: selection.start, trackIDs: selection.ids))
+    }
     func loadMacPage() { send(Packet(action: "library", offset: incomingTracks.count)) }
     func disconnect() {
         cacheEpoch += 1; requestedArtwork = []

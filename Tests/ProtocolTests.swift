@@ -60,9 +60,38 @@ import Network
         precondition(requests.removeFirst().action == "pause")
         precondition(requests.removeFirst().action == "artwork")
         print("PASS: AirPlay/playback controls bypass 100 queued artwork requests, preserving control order")
+        precondition(LibraryNavigation.position(0, count: 2777) == 0)
+        precondition(LibraryNavigation.position(1, count: 2777) == 2776)
+        precondition(LibraryNavigation.position(-1, count: 3) == 0)
+        precondition(LibraryNavigation.position(2, count: 3) == 2)
+        precondition(LibraryNavigation.position(0.5, count: 0) == 0)
+        precondition(QuickScrollTarget(id: "a", title: "周杰伦").label == "Z")
+        precondition(QuickScrollTarget(id: "a", title: "123").label == "#")
+        var one = unknown; one.id = "1"; one.album = "Album"; one.genre = "New Age"; one.trackNumber = 1; one.discNumber = 1
+        var two = one; two.id = "2"; two.genre = "Pop"; two.trackNumber = 2
+        var disc2 = one; disc2.id = "3"; disc2.discNumber = 2
+        var other = one; other.id = "4"; other.album = "Other"; other.genre = "Rock"
+        precondition(LibraryNavigation.albumsInGenre([one, two, disc2, other], genre: "New Age").map(\.id) == ["1", "2", "3"])
+        precondition(LibraryNavigation.albumTracks([disc2, two, one]).map(\.id) == ["1", "2", "3"])
+        precondition(LibraryNavigation.albumTracks([two, one], playlist: true).map(\.id) == ["2", "1"])
+        let selected = PlaybackSelection(tracks: [one, two, disc2], selectedID: two.id)!
+        precondition(selected.ids == [one.id, two.id, disc2.id] && selected.start == 1)
+        precondition(PlaybackSelection(tracks: [one], selectedID: other.id) == nil)
+        let selectedPacket = Packet(action: "queue", offset: selected.start, trackIDs: selected.ids)
+        let decodedSelection = try JSONDecoder().decode(Packet.self, from: JSONEncoder().encode(selectedPacket))
+        precondition(decodedSelection.offset == 1 && decodedSelection.trackIDs == selected.ids)
+        // A large song list fits one bounded frame without repeating metadata.
+        let bigQueue = Packet(action: "queue", offset: 9999, trackIDs: (0..<10000).map { String(format: "%016X", $0) })
+        precondition(trySize(bigQueue) < LineDecoder.maximum)
+        print("PASS: contextual selection includes full ordered IDs + exact starting index; 10000-song bounded queue")
+        let shufflePacket = Packet(action: "queue", value: 1, tracks: [one])
+        let decodedShuffle = try JSONDecoder().decode(Packet.self, from: JSONEncoder().encode(shufflePacket))
+        precondition(decodedShuffle.value == 1)
+        print("PASS: genre selects full albums; multi-disc order; playlist order; quick-scroll bounds/pinyin; shuffle queue flag")
         lanTest { print("PASS: all tests"); exit(0) }
         dispatchMain()
     }
+    static func trySize(_ packet: Packet) -> Int { try! JSONEncoder().encode(packet).count }
     static func tryCount(_ decoder: inout LineDecoder, _ data: Data) -> Int { try! decoder.append(data).count }
     static var retained: [AnyObject] = []
     static func lanTest(completion: @escaping () -> Void) {
