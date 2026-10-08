@@ -197,7 +197,7 @@ struct SettingsView: View {
             }
             Section("状态") { Text(remote.message).textSelection(.enabled) }
             Section("关于") {
-                LabeledContent("音乐遥控", value: "0.5.0")
+                LabeledContent("音乐遥控", value: "0.5.1")
                 Text("同一局域网免配对，可同时连接多台遥控设备。").font(.footnote)
             }
         }.navigationTitle("设置")
@@ -625,8 +625,18 @@ struct PlayerView: View {
                 }.accessibilityLabel("播放音量").disabled(!remote.connected)
                 Image(systemName: "speaker.wave.3.fill").font(.caption)
             }.foregroundStyle(.white.opacity(0.6))
-            Button { showRoutes = true } label: { Image(systemName: "airplay.audio").font(.system(size: 26)).frame(width: 60, height: 44) }
-                .buttonStyle(.plain).accessibilityLabel("AirPlay 与音频输出").disabled(!remote.connected)
+            HStack(spacing: 36) {
+                Button { remote.command("shuffle", value: remote.playback.shuffle == true ? 0 : 1) } label: {
+                    Image(systemName: "shuffle").frame(width: 44, height: 44)
+                        .background(remote.playback.shuffle == true ? .white.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 10))
+                }.accessibilityLabel("随机播放").accessibilityValue(remote.playback.shuffle == true ? "开启" : "关闭")
+                Button { showRoutes = true } label: { Image(systemName: "airplay.audio").frame(width: 44, height: 44) }
+                    .accessibilityLabel("AirPlay 与音频输出")
+                Button { remote.command("repeat", value: Double(((remote.playback.repeatMode ?? 0) + 1) % 3)) } label: {
+                    Image(systemName: remote.playback.repeatMode == 2 ? "repeat.1" : "repeat").frame(width: 44, height: 44)
+                        .background((remote.playback.repeatMode ?? 0) > 0 ? .white.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 10))
+                }.accessibilityLabel("循环播放").accessibilityValue(remote.playback.repeatMode == 2 ? "单曲循环" : remote.playback.repeatMode == 1 ? "全部循环" : "关闭")
+            }.font(.system(size: 19)).buttonStyle(.plain).disabled(!remote.connected)
         }.foregroundStyle(.white).tint(.white.opacity(0.7))
     }
     private func time(_ value: Double) -> String { let n = max(0, Int(value)); return String(format: "%d:%02d", n / 60, n % 60) }
