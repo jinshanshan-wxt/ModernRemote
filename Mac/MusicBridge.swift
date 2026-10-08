@@ -9,6 +9,73 @@ final class MusicBridge {
     private var airDeviceIDs: [String: String] = [:]
     private var localTrackIDs: Set<String>?
     private var artworkCache: [String: Data] = [:]
+    private var disk: LibraryDiskCache?
+    private var serverID = ""
+    private var snapshot: LibrarySnapshot?
+    private var cachedPlaylists: [RemotePlaylist]?
+    private var cachedPlaylistTracks: [String: [RemoteTrack]] = [:]
+    private var pages: [String: [Int: ([RemoteTrack], Bool)]] = [:]
+    private var refreshing = false
+
+    func cacheInfo() throws -> LibraryCacheInfo {
+        let library = try run("set p to library playlist 1\nreturn {persistent ID of p, count of tracks of p}")
+        guard let libraryID = library.atIndex(1)?.stringValue else { throw failure("无法确认 Mac 资料库。") }
+        let defaults = UserDefaults.standard
+        let installation = defaults.string(forKey: "cache.installationID") ?? UUID().uuidString
+        defaults.set(installation, forKey: "cache.installationID")
+        let identity = installation + ":" + libraryID
+        if identity != serverID {
+            serverID = identity; disk = LibraryDiskCache(namespace: "mac:" + identity)
+            snapshot = disk?.snapshot(); cachedPlaylists = snapshot?.playlists
+            cachedPlaylistTracks = snapshot?.playlistTracks ?? [:]
+            pages = [:]; artworkCache = [:]; localTrackIDs = nil; refreshing = false
+        }
+        let stale = snapshot.map { Date().timeIntervalSince1970 - $0.updatedAt >= 86400 || $0.tracks.count != Int(library.atIndex(2)?.int32Value ?? 0) } ?? true
+        return LibraryCacheInfo(serverID: serverID, revision: snapshot?.revision, updatedAt: snapshot?.updatedAt, needsRefresh: stale)
+    }
+    var currentCacheInfo: LibraryCacheInfo {
+        LibraryCacheInfo(serverID: serverID, revision: snapshot?.revision, updatedAt: snapshot?.updatedAt, needsRefresh: snapshot == nil)
+    }
+    func refreshCache(clearArtwork: Bool) {
+        // Concurrent clients share one rebuild; a second client must not reset its pages.
+        guard !refreshing else { return }
+        refreshing = true; snapshot = nil; cachedPlaylists = nil; cachedPlaylistTracks = [:]; pages = [:]; localTrackIDs = nil
+        if clearArtwork { disk?.clear(); artworkCache = [:] } else { disk?.removeSnapshot() }
+    }
+    private func saveSnapshot() {
+        guard var value = snapshot else { return }
+        value.playlists = cachedPlaylists ?? value.playlists
+        value.playlistTracks = cachedPlaylistTracks
+        snapshot = value; disk?.save(value)
+    }
+    func library(offset: Int, playlistID: String? = nil) throws -> ([RemoteTrack], Bool) {
+        guard offset >= 0 && offset <= 1_000_000 else { throw failure("资料库分页位置无效。") }
+        if disk == nil { _ = try cacheInfo() }
+        let key = playlistID ?? "library"
+        let full = playlistID.flatMap { cachedPlaylistTracks[$0] } ?? (playlistID == nil ? snapshot?.tracks : nil)
+        if let full { return (Array(full.dropFirst(offset).prefix(200)), offset + 200 < full.count) }
+        if let page = pages[key]?[offset] { return page }
+        let page = try readLibrary(offset: offset, playlistID: playlistID)
+        pages[key, default: [:]][offset] = page
+        if !page.1 {
+            var complete: [RemoteTrack] = []; var next = 0
+            while let part = pages[key]?[next] {
+                complete.append(contentsOf: part.0)
+                if !part.1 {
+                    if let id = playlistID { cachedPlaylistTracks[id] = complete }
+                    else {
+                        let lists = try playlists()
+                        snapshot = LibrarySnapshot(revision: UUID().uuidString, updatedAt: Date().timeIntervalSince1970,
+                            tracks: complete, playlists: lists, playlistTracks: cachedPlaylistTracks)
+                        refreshing = false
+                    }
+                    pages[key] = nil; saveSnapshot(); break
+                }
+                guard !part.0.isEmpty else { break }; next += part.0.count
+            }
+        }
+        return page
+    }
 
     static func quote(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
@@ -42,10 +109,10 @@ final class MusicBridge {
         guard let item else { return 0 }
         return item.coerce(toDescriptorType: typeIEEE64BitFloatingPoint)?.doubleValue ?? 0
     }
-    func library(offset: Int, playlistID: String? = nil) throws -> ([RemoteTrack], Bool) {
+    private func readLibrary(offset: Int, playlistID: String? = nil) throws -> ([RemoteTrack], Bool) {
         guard offset >= 0 && offset <= 1_000_000 else { throw failure("资料库分页位置无效，请重新加载。") }
         if let id = playlistID, !(id.count == 16 && id.allSatisfy({ $0.isHexDigit })) { throw failure("播放列表 ID 无效。") }
-        if offset == 0 || localTrackIDs == nil {
+        if localTrackIDs == nil {
             // Do not expose filesystem paths; only publish whether a Music file track has a location.
             if let ids = try? run("get persistent ID of (file tracks of library playlist 1 whose location is not missing value)") {
                 localTrackIDs = Set((0..<ids.numberOfItems).compactMap { ids.atIndex($0 + 1)?.stringValue })
@@ -83,6 +150,12 @@ final class MusicBridge {
         return (tracks, offset + tracks.count < Int(result.atIndex(2)?.int32Value ?? 0))
     }
     func playlists() throws -> [RemotePlaylist] {
+        if disk == nil { _ = try cacheInfo() }
+        if let cachedPlaylists { return cachedPlaylists }
+        let result = try readPlaylists()
+        cachedPlaylists = result; saveSnapshot(); return result
+    }
+    private func readPlaylists() throws -> [RemotePlaylist] {
         let rows = try run("""
         set output to {}
         repeat with p in user playlists
@@ -98,19 +171,26 @@ final class MusicBridge {
     }
     func artwork(id: String) throws -> Data? {
         guard id.count == 16, id.allSatisfy({ $0.isHexDigit }) else { throw failure("歌曲 ID 无效。") }
-        if let cached = artworkCache[id] { return cached }
+        if disk == nil { _ = try cacheInfo() }
+        if let cached = artworkCache[id] { return cached.isEmpty ? nil : cached }
+        if let cached = disk?.artwork(id) {
+            if artworkCache.count >= 300 { artworkCache.removeAll() }
+            artworkCache[id] = cached; return cached.isEmpty ? nil : cached
+        }
         let result = try run("""
         set t to first track of library playlist 1 whose persistent ID is \(Self.quote(id))
         if (count of artworks of t) is 0 then return missing value
         return raw data of artwork 1 of t
         """)
-        guard let image = NSImage(data: result.data) else { return nil }
+        guard let image = NSImage(data: result.data) else {
+            artworkCache[id] = Data(); disk?.saveArtwork(Data(), id: id); return nil
+        }
         let small = NSImage(size: NSSize(width: 320, height: 320))
         small.lockFocus(); image.draw(in: NSRect(x: 0, y: 0, width: 320, height: 320)); small.unlockFocus()
         guard let tiff = small.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
               let data = bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else { return nil }
         if artworkCache.count >= 300 { artworkCache.removeAll() }
-        artworkCache[id] = data
+        artworkCache[id] = data; disk?.saveArtwork(data, id: id)
         return data
     }
     private func playQueue(_ tracks: [RemoteTrack]) throws {

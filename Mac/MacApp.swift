@@ -50,9 +50,16 @@ final class Companion: ObservableObject {
             guard let self, let peer else { return }
             var reply = Packet(id: request.id, action: "reply")
             do {
-                if request.action == "library" {
+                if request.action == "cacheInfo" {
+                    reply.cacheInfo = try self.music.cacheInfo()
+                } else if request.action == "library" {
+                    if request.refresh == true && (request.offset ?? 0) == 0 && request.playlistID == nil {
+                        _ = try self.music.cacheInfo()
+                        self.music.refreshCache(clearArtwork: request.clearArtwork == true)
+                    }
                     let page = try self.music.library(offset: request.offset ?? 0, playlistID: request.playlistID)
                     reply.tracks = page.0; reply.hasMore = page.1; reply.playlistID = request.playlistID
+                    reply.cacheInfo = self.music.currentCacheInfo
                 } else if request.action == "artwork", let id = request.artworkID {
                     reply.artworkID = id; reply.artwork = try self.music.artwork(id: id)
                 } else if request.action == "routes" {

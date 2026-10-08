@@ -29,6 +29,43 @@ final class RemoteClient: ObservableObject {
     private var deferred = RequestQueue()
     private var timeout: DispatchWorkItem?
     private var timer: AnyCancellable?
+    @Published var cacheUpdatedAt: Double?
+    private var disk: LibraryDiskCache?
+    private var cacheID = ""
+    private var cacheRevision: String?
+    private var incomingTracks: [RemoteTrack] = []
+    private var rebuildingLibrary = false
+    @Published private(set) var cacheEpoch = 0
+    private var lastCacheCheck = Date.distantPast
+    init() {
+        if let id = UserDefaults.standard.string(forKey: "cache.lastServerID") {
+            selectCache(id)
+            macName = UserDefaults.standard.string(forKey: "cache.lastHost") ?? ""
+        }
+    }
+    private func selectCache(_ id: String) {
+        if id != cacheID {
+            cacheEpoch += 1; cacheID = id; disk = LibraryDiskCache(namespace: "ios:" + id)
+            artwork = [:]; requestedArtwork = []; macTracks = []; playlists = []; playlistTracks = [:]; completedPlaylists = []
+            cacheRevision = nil; cacheUpdatedAt = nil
+            if let value = disk?.snapshot() {
+                macTracks = value.tracks; playlists = value.playlists; playlistTracks = value.playlistTracks
+                completedPlaylists = Set(value.playlistTracks.keys); cacheRevision = value.revision; cacheUpdatedAt = value.updatedAt; hasMore = false
+            }
+        }
+        UserDefaults.standard.set(id, forKey: "cache.lastServerID")
+    }
+    private func saveCache() {
+        guard !rebuildingLibrary, let revision = cacheRevision, let date = cacheUpdatedAt else { return }
+        let completeLists = playlistTracks.filter { completedPlaylists.contains($0.key) }
+        disk?.save(LibrarySnapshot(revision: revision, updatedAt: date, tracks: macTracks,
+            playlists: playlists, playlistTracks: completeLists))
+    }
+    private func rememberArtwork(_ data: Data, id: String) {
+        guard !data.isEmpty else { return }
+        if artwork.count >= 300, let old = artwork.keys.first(where: { $0 != playback.trackID }) { artwork[old] = nil }
+        artwork[id] = data
+    }
     func discover(restart: Bool = false) {
         if restart {
             browser?.stateUpdateHandler = nil
@@ -70,17 +107,28 @@ final class RemoteClient: ObservableObject {
     private func connect(endpoint: NWEndpoint, name: String) {
         disconnect()
         wantsConnection = true; connecting = true
-        macTracks = []; playlists = []; playlistTracks = [:]; completedPlaylists = []; artwork = [:]; requestedArtwork = []; hasMore = true
+        rebuildingLibrary = false; incomingTracks = []; loadingLibrary = false
+        let knownHosts = UserDefaults.standard.dictionary(forKey: "cache.hosts") as? [String: String] ?? [:]
+        if let id = knownHosts[name] { selectCache(id) }
+        else {
+            cacheEpoch += 1; disk = nil; cacheID = ""; cacheRevision = nil; cacheUpdatedAt = nil
+            macTracks = []; playlists = []; playlistTracks = [:]; completedPlaylists = []; artwork = [:]; requestedArtwork = []; hasMore = true
+        }
+        macName = name
         message = "正在连接 Mac……"
         let peer = Wire(NWConnection(to: endpoint, using: SecureLAN.parameters()))
         wire = peer
         peer.onReady = { [weak self] in
             guard let self else { return }
             self.macName = name; self.connecting = false; self.connected = true; self.message = "已连接到 \(name)"
-            self.reloadLibrary()
+            self.lastCacheCheck = Date()
+            self.send(Packet(action: "cacheInfo"))
             self.timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect().sink { [weak self] _ in
                 guard let self else { return }
                 self.send(Packet(action: "status"))
+                if Date().timeIntervalSince(self.lastCacheCheck) >= 86400 && !self.loadingLibrary {
+                    self.lastCacheCheck = Date(); self.send(Packet(action: "cacheInfo"))
+                }
             }
         }
         peer.onClose = { [weak self] reason in
@@ -96,11 +144,45 @@ final class RemoteClient: ObservableObject {
             let requestAction = self.pendingAction
             self.timeout?.cancel(); self.pending = nil; self.pendingAction = nil; self.busy = false
             if let error = packet.error { self.message = error }
+            if requestAction == "cacheInfo" {
+                if let info = packet.cacheInfo {
+                    self.selectCache(info.serverID)
+                    var hosts = UserDefaults.standard.dictionary(forKey: "cache.hosts") as? [String: String] ?? [:]
+                    hosts[name] = info.serverID; UserDefaults.standard.set(hosts, forKey: "cache.hosts")
+                    UserDefaults.standard.set(name, forKey: "cache.lastHost")
+                    if self.cacheRevision == info.revision && info.revision != nil && !info.needsRefresh {
+                        self.message = "已连接到 \(name) · 已读取磁盘缓存"
+                        self.send(Packet(action: "status"))
+                    } else {
+                        self.startLibraryReload(refreshMac: info.needsRefresh, clearArtwork: false)
+                    }
+                } else {
+                    // Old companions have no cache manifest; retain protocol compatibility.
+                    self.selectCache("legacy:" + name)
+                    self.cacheRevision = UUID().uuidString; self.cacheUpdatedAt = Date().timeIntervalSince1970
+                    self.startLibraryReload(refreshMac: false, clearArtwork: false)
+                }
+            }
+            if requestAction != "cacheInfo", let info = packet.cacheInfo {
+                if !info.serverID.isEmpty && info.serverID != self.cacheID {
+                    self.selectCache(info.serverID)
+                    var hosts = UserDefaults.standard.dictionary(forKey: "cache.hosts") as? [String: String] ?? [:]
+                    hosts[name] = info.serverID; UserDefaults.standard.set(hosts, forKey: "cache.hosts")
+                    UserDefaults.standard.set(name, forKey: "cache.lastHost")
+                }
+                if let revision = info.revision { self.cacheRevision = revision; self.cacheUpdatedAt = info.updatedAt }
+            }
             if let playback = packet.playback {
                 self.playback = playback
                 if let id = playback.trackID { self.loadArtwork(id) }
             }
-            if let id = packet.artworkID, let data = packet.artwork { self.artwork[id] = data }
+            if let id = packet.artworkID {
+                self.requestedArtwork.remove(id)
+                if packet.error == nil {
+                    let data = packet.artwork ?? Data()
+                    self.rememberArtwork(data, id: id); self.disk?.saveArtwork(data, id: id)
+                }
+            }
             if let routes = packet.routes {
                 self.routes = routes
                 if requestAction == "route", let selectedID = self.selectingRouteID {
@@ -110,20 +192,24 @@ final class RemoteClient: ObservableObject {
             if requestAction == "route" { self.selectingRouteID = nil }
             if let error = packet.error, requestAction == "routes" || requestAction == "route" { self.routeMessage = error }
             if let lists = packet.playlists {
-                self.playlists = lists
+                self.playlists = lists; self.saveCache()
             }
             if let tracks = packet.tracks {
                 if let id = packet.playlistID {
                     self.playlistTracks[id, default: []].append(contentsOf: tracks)
-                    if packet.hasMore == false { self.completedPlaylists.insert(id) }
+                    if packet.hasMore == false { self.completedPlaylists.insert(id); self.saveCache() }
                     if packet.hasMore == true { self.deferred.append(Packet(action: "library", offset: self.playlistTracks[id]?.count ?? 0, playlistID: id)) }
                 } else {
-                    self.macTracks.append(contentsOf: tracks); self.hasMore = packet.hasMore ?? false
+                    self.incomingTracks.append(contentsOf: tracks); self.hasMore = packet.hasMore ?? false
                     self.loadingLibrary = self.hasMore
-                    if self.hasMore { self.deferred.append(Packet(action: "library", offset: self.macTracks.count)) }
+                    if self.hasMore { self.deferred.append(Packet(action: "library", offset: self.incomingTracks.count)) }
+                    else {
+                        self.macTracks = self.incomingTracks; self.incomingTracks = []; self.rebuildingLibrary = false
+                        self.saveCache(); self.message = "已连接到 \(name) · 资料库已缓存"
+                    }
                 }
             }
-            if packet.error != nil { self.loadingLibrary = false }
+            if packet.error != nil && requestAction != "cacheInfo" { self.loadingLibrary = false; self.rebuildingLibrary = false }
             if !self.deferred.isEmpty {
                 let next = self.deferred.removeFirst()
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.send(next) }
@@ -140,10 +226,15 @@ final class RemoteClient: ObservableObject {
     }
     func reloadLibrary() {
         guard connected, !busy else { return }
-        macTracks = []; playlistTracks = [:]; completedPlaylists = []; artwork = [:]; requestedArtwork = []; hasMore = true; loadingLibrary = true
-        send(Packet(action: "library", offset: 0))
-        send(Packet(action: "playlists"))
-        deferred.append(Packet(action: "status"))
+        disk?.clear(); artwork = [:]; requestedArtwork = []; cacheEpoch += 1
+        startLibraryReload(refreshMac: true, clearArtwork: true)
+    }
+    private func startLibraryReload(refreshMac: Bool, clearArtwork: Bool) {
+        incomingTracks = []; rebuildingLibrary = true; hasMore = true; loadingLibrary = true
+        playlistTracks = [:]; completedPlaylists = []
+        var request = Packet(action: "library", offset: 0)
+        request.refresh = refreshMac; request.clearArtwork = clearArtwork
+        send(request); send(Packet(action: "playlists")); deferred.append(Packet(action: "status"))
     }
     func loadPlaylist(_ id: String) {
         guard playlistTracks[id] == nil else { return }
@@ -156,9 +247,20 @@ final class RemoteClient: ObservableObject {
         selectingRouteID = id; routeMessage = "正在连接音频输出……"; send(Packet(action: "route", routeID: id))
     }
     func loadArtwork(_ id: String) {
-        guard connected, !requestedArtwork.contains(id) else { return }
+        guard artwork[id] == nil, !requestedArtwork.contains(id) else { return }
         requestedArtwork.insert(id)
-        send(Packet(action: "artwork", artworkID: id))
+        let epoch = cacheEpoch
+        if let disk {
+            disk.loadArtwork(id) { [weak self] data in
+                DispatchQueue.main.async {
+                    guard let self, self.cacheEpoch == epoch else { return }
+                    if let data { self.rememberArtwork(data, id: id); self.requestedArtwork.remove(id) }
+                    else if self.connected { self.send(Packet(action: "artwork", artworkID: id)) }
+                    else { self.requestedArtwork.remove(id) }
+                }
+            }
+        } else if connected { send(Packet(action: "artwork", artworkID: id)) }
+        else { requestedArtwork.remove(id) }
     }
     func playQueue(_ tracks: [RemoteTrack]) { send(Packet(action: "queue", tracks: tracks)) }
     func send(_ packet: Packet) {
@@ -172,8 +274,9 @@ final class RemoteClient: ObservableObject {
     }
     func command(_ action: String, value: Double? = nil) { send(Packet(action: action, value: value)) }
     func play(_ track: RemoteTrack) { send(Packet(action: "track", track: track)) }
-    func loadMacPage() { send(Packet(action: "library", offset: macTracks.count)) }
+    func loadMacPage() { send(Packet(action: "library", offset: incomingTracks.count)) }
     func disconnect() {
+        cacheEpoch += 1; requestedArtwork = []
         wantsConnection = false; connecting = false
         timer = nil; timeout?.cancel(); wire?.close(); wire = nil
         selectingRouteID = nil; routes = []; routeMessage = ""

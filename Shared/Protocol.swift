@@ -48,6 +48,9 @@ struct Playback: Codable {
     var repeatMode: Int? = nil
 }
 struct Packet: Codable {
+    var cacheInfo: LibraryCacheInfo? = nil
+    var refresh: Bool? = nil
+    var clearArtwork: Bool? = nil
     var version = 1
     var id = UUID().uuidString
     var action: String

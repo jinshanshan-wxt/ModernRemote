@@ -1,4 +1,4 @@
-# Modern Remote 0.6.1
+# Modern Remote 0.7.0
 
 <img src="Assets/Mac-Icon-1024.png" width="128" alt="Modern Remote Mac icon">
 
@@ -67,3 +67,5 @@ The Mac companion lives in the menu bar, without a Dock icon or launch window. S
 Mobile UI: compact song rows with artist/album columns, dedicated library search in More (iPad sidebar), persistent four-slot tab editing with tap or drag-and-drop, a shared Music accent for UIKit and SwiftUI, and slider thumbs shown only while dragging. Album/playlist covers, track rows, separators and totals share a single 24-point content inset.
 
 Track titles use 16-point text, supporting metadata uses 13/14-point text, and rows use 46-point height for comfortable reading.
+
+Persistent cache: both platforms store complete library snapshots, opened playlists and 320px artwork in Application Support, excluded from backups. Cache namespaces combine a persistent Mac installation UUID and Music library persistent ID. On launch the mobile app restores its last snapshot and connects with a small cache manifest; matching revisions skip all library/playlist transfers. The Mac reuses its snapshot after restart instead of rescripting every track. Track-count changes or a 24-hour age trigger one shared rebuild. Metadata edits and playlist changes appear at the next automatic check; manual Reload Library and Artwork immediately rebuilds both caches and invalidates artwork. Artwork (including missing-artwork results) is stored individually; disk artwork is capped at approximately 256 MB per library and memory at 300 images. Only complete snapshots/playlists are saved atomically, corrupt files fall back to reload. First use or manual refresh still requires a full scan. Update both companions to use the manifest optimization.

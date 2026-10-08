@@ -358,9 +358,16 @@ struct SettingsView: View {
                 Button("重新加载资料库与封面") { remote.reloadLibrary() }.disabled(!remote.connected || remote.busy || remote.loadingLibrary)
                 Text("所有分类、搜索、播放列表和封面都来自选中的 Mac“音乐”资料库。").font(.footnote).foregroundStyle(.secondary)
             }
+            Section("磁盘缓存") {
+                if let timestamp = remote.cacheUpdatedAt {
+                    LabeledContent("资料库更新时间") { Text(Date(timeIntervalSince1970: timestamp), style: .date) }
+                }
+                Text("曲库、播放列表和封面保存在本机。启动先读缓存；每 24 小时检查更新，曲目数量变化时重新读取。手动刷新会更新 Mac 与本机缓存。")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             Section("状态") { Text(remote.message).textSelection(.enabled) }
             Section("关于") {
-                LabeledContent("音乐遥控", value: "0.6.1")
+                LabeledContent("音乐遥控", value: "0.7.0")
                 Text("同一局域网免配对，可同时连接多台遥控设备。").font(.footnote)
             }
         }.navigationTitle("设置")
@@ -905,6 +912,6 @@ struct MacArtwork: View {
                 Image(uiImage: image).resizable().scaledToFill()
             } else { Image(systemName: "music.note").resizable().scaledToFit().padding(size * 0.25).foregroundStyle(.pink).background(.quaternary) }
         }.frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: min(size * 0.025, 14)))
-            .task(id: id) { if let id { remote.loadArtwork(id) } }
+            .task(id: "\(remote.cacheEpoch):\(remote.connected):\(id ?? "")") { if let id { remote.loadArtwork(id) } }
     }
 }

@@ -3,6 +3,25 @@ import Network
 
 @main struct Tests {
     static func main() throws {
+        let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent("ModernRemote-cache-tests-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: cacheRoot) }
+        let first = LibraryDiskCache(namespace: "Mac A:Library 1", root: cacheRoot)
+        let cachedTrack = RemoteTrack(id: "0123456789ABCDEF", title: "缓存歌曲", artist: "艺人", album: "专辑", duration: 180)
+        let cachedSnapshot = LibrarySnapshot(revision: "r1", updatedAt: 1234, tracks: [cachedTrack], playlists: [], playlistTracks: ["playlist": [cachedTrack]])
+        first.save(cachedSnapshot); first.saveArtwork(Data([1, 2, 3]), id: cachedTrack.id); first.saveArtwork(Data(), id: "missing"); first.flush()
+        let reopened = LibraryDiskCache(namespace: "Mac A:Library 1", root: cacheRoot)
+        precondition(reopened.snapshot()?.tracks == [cachedTrack])
+        precondition(reopened.snapshot()?.playlistTracks["playlist"] == [cachedTrack])
+        precondition(reopened.artwork(cachedTrack.id) == Data([1, 2, 3]))
+        precondition(reopened.artwork("missing") == Data())
+        precondition(LibraryDiskCache(namespace: "Mac B:Library 1", root: cacheRoot).snapshot() == nil)
+        precondition(LibraryDiskCache(namespace: "Mac A:Library 2", root: cacheRoot).artwork(cachedTrack.id) == nil)
+        first.removeSnapshot(); precondition(first.snapshot() == nil && first.artwork(cachedTrack.id) != nil)
+        try Data("broken snapshot".utf8).write(to: first.directory.appendingPathComponent("library.json"))
+        precondition(first.snapshot() == nil)
+        first.save(cachedSnapshot); first.flush(); precondition(first.snapshot()?.revision == "r1")
+        first.clear(); precondition(first.snapshot() == nil && first.artwork(cachedTrack.id) == nil)
+        print("PASS: disk cache survives re-instantiation, isolates Mac/libraries, stores playlists and missing artwork, recovers corruption, clears safely")
         let packet = Packet(action: "track", track: RemoteTrack(id: "id", title: "雪 / \"song\"\n", artist: "Artist", album: "Album", duration: 180))
         var data = try JSONEncoder().encode(packet); data.append(10)
         var decoder = LineDecoder()
