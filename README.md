@@ -1,4 +1,4 @@
-# Modern Remote 0.5.2
+# Modern Remote 0.6.0
 
 <img src="Assets/Mac-Icon-1024.png" width="128" alt="Modern Remote Mac icon">
 
@@ -63,3 +63,5 @@ Both native Release targets and the iOS Simulator target compile with Xcode 26.3
 - Missing AirPlay destination: confirm it is visible and available in Mac Music, then refresh the output picker. Local output selection changes system audio, including other apps.
 
 The Mac companion lives in the menu bar, without a Dock icon or launch window. Sharing starts automatically on launch. Click the menu bar play icon for status, connection addresses, start/stop sharing, or Quit.
+
+Mobile UI: compact song rows with artist/album columns, dedicated library search in More (iPad sidebar), persistent four-slot tab editing with tap or drag-and-drop, a shared Music accent for UIKit and SwiftUI, and slider thumbs shown only while dragging. Album/playlist covers, track rows, separators and totals share a single 24-point content inset.

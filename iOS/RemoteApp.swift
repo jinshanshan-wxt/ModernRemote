@@ -1,21 +1,74 @@
 import SwiftUI
 import Network
+import UniformTypeIdentifiers
 
 @main struct ModernRemoteApp: App {
     @StateObject private var remote = RemoteClient()
+    init() {
+        // UIKit-backed navigation and tab controllers must share the app accent,
+        // including controllers created again when tapping More repeatedly.
+        let accent = UIColor(named: "AccentColor") ?? UIColor(red: 1, green: 0.15, blue: 0.25, alpha: 1)
+        UIView.appearance().tintColor = accent
+        UINavigationBar.appearance().tintColor = accent
+        UITabBar.appearance().tintColor = accent
+    }
     var body: some Scene {
         WindowGroup {
-            AdaptiveRemoteView().tint(Color(red: 1, green: 0.15, blue: 0.25)).environmentObject(remote)
+            AdaptiveRemoteView().tint(Color.accentColor).environmentObject(remote)
                 .environment(\.locale, Locale(identifier: "zh_Hans"))
 
         }
     }
 }
 
+enum LibrarySection: String, CaseIterable, Identifiable {
+    case artists = "Artists", albums = "Albums", songs = "Songs", genres = "Genres"
+    case playlists = "Playlists", recent = "Recent", search = "Search"
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .artists: return "艺人"
+        case .albums: return "专辑"
+        case .songs: return "歌曲"
+        case .genres: return "类型"
+        case .playlists: return "播放列表"
+        case .recent: return "最近添加"
+        case .search: return "搜索"
+        }
+    }
+    var symbol: String {
+        switch self {
+        case .artists: return "music.mic"
+        case .albums: return "square.stack"
+        case .songs: return "music.note"
+        case .genres: return "guitars"
+        case .playlists: return "music.note.list"
+        case .recent: return "clock"
+        case .search: return "magnifyingglass"
+        }
+    }
+    static let defaults: [LibrarySection] = [.artists, .albums, .songs, .genres]
+    static func tabs(_ stored: String) -> [LibrarySection] {
+        var result: [LibrarySection] = []
+        for value in stored.split(separator: ",") {
+            if let section = LibrarySection(rawValue: String(value)), !result.contains(section) { result.append(section) }
+        }
+        for section in defaults where !result.contains(section) { result.append(section) }
+        return Array(result.prefix(4))
+    }
+}
+struct LibraryDestination: View {
+    let section: LibrarySection
+    var body: some View {
+        if section == .search { LibrarySearchView() }
+        else { LibraryView(category: section.rawValue) }
+    }
+}
 struct AdaptiveRemoteView: View {
     @EnvironmentObject var remote: RemoteClient
     @Environment(\.horizontalSizeClass) private var sizeClass
-    @State private var selection = 0
+    @AppStorage("navigation.tabs") private var tabOrder = "Artists,Albums,Songs,Genres"
+    @State private var selection = "Artists"
     @State private var showPlayer = false
     var body: some View {
         Group {
@@ -23,26 +76,25 @@ struct AdaptiveRemoteView: View {
                 PadLibraryView(showPlayer: { showPlayer = true })
             } else if #available(iOS 26.0, *) {
                 tabs.tabViewBottomAccessory { MiniPlayer { showPlayer = true } }
-            } else {
-                tabs
-            }
+            } else { tabs }
         }
         .fullScreenCover(isPresented: $showPlayer) { PlayerView() }
         .task { remote.discover() }
+        .onChange(of: tabOrder) { _, _ in
+            if selection != "More", !LibrarySection.tabs(tabOrder).contains(where: { $0.rawValue == selection }) { selection = "More" }
+        }
     }
     private var tabs: some View {
         TabView(selection: $selection) {
-            tab("Artists").tabItem { Label("艺人", systemImage: "person.fill") }.tag(0)
-            tab("Albums").tabItem { Label("专辑", systemImage: "square.stack.fill") }.tag(1)
-            tab("Songs").tabItem { Label("歌曲", systemImage: "music.note") }.tag(2)
-            tab("Genres").tabItem { Label("类型", systemImage: "tag.fill") }.tag(3)
-            NavigationStack { MoreView() }.modifier(LegacyPlayerInset(showPlayer: { showPlayer = true }))
-                .tabItem { Label("更多", systemImage: "ellipsis") }.tag(4)
-        }
-    }
-    private func tab(_ category: String) -> some View {
-        NavigationStack { LibraryView(category: category) }
-            .modifier(LegacyPlayerInset(showPlayer: { showPlayer = true }))
+            ForEach(LibrarySection.tabs(tabOrder)) { section in
+                NavigationStack { LibraryDestination(section: section) }
+                    .modifier(LegacyPlayerInset(showPlayer: { showPlayer = true }))
+                    .tabItem { Label(section.title, systemImage: section.symbol) }.tag(section.rawValue)
+            }
+            NavigationStack { MoreView(tabOrder: $tabOrder) }
+                .modifier(LegacyPlayerInset(showPlayer: { showPlayer = true }))
+                .tabItem { Label("更多", systemImage: "ellipsis") }.tag("More")
+        }.tint(.accentColor)
     }
 }
 struct PadLibraryView: View {
@@ -51,9 +103,10 @@ struct PadLibraryView: View {
     @State private var category: String? = "Albums"
     @State private var visibility: NavigationSplitViewVisibility = .all
     private let sections: [(String, String, String)] = [
-        ("Recent", "最近添加", "clock"), ("Artists", "艺人", "person.fill"),
-        ("Albums", "专辑", "square.stack.fill"), ("Songs", "歌曲", "music.note"),
-        ("Genres", "类型", "tag.fill"), ("Playlists", "播放列表", "music.note.list")
+        ("Recent", "最近添加", "clock"), ("Artists", "艺人", "music.mic"),
+        ("Albums", "专辑", "square.stack"), ("Songs", "歌曲", "music.note"),
+        ("Genres", "类型", "guitars"), ("Playlists", "播放列表", "music.note.list"),
+        ("Search", "搜索", "magnifyingglass")
     ]
     var body: some View {
         NavigationSplitView(columnVisibility: $visibility) {
@@ -62,7 +115,7 @@ struct PadLibraryView: View {
                     ForEach(sections, id: \.0) { item in
                         Button { category = item.0 } label: {
                             Label(item.1, systemImage: item.2)
-                                .foregroundStyle(category == item.0 ? Color(red: 1, green: 0.15, blue: 0.25) : .primary)
+                                .foregroundStyle(category == item.0 ? Color.accentColor : .primary)
                                 .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                         }.buttonStyle(.plain).tag(item.0)
                     }
@@ -76,13 +129,14 @@ struct PadLibraryView: View {
                 .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 280)
         } detail: {
             NavigationStack {
-                detail
-            }.id(category)
-        }.navigationSplitViewStyle(.balanced).tint(Color(red: 1, green: 0.15, blue: 0.25))
-            .safeAreaInset(edge: .bottom, spacing: 0) { PadPlaybackBar(showPlayer: showPlayer) }
+                detail.safeAreaPadding(.bottom, 90)
+            }.id(category).clipped()
+        }.navigationSplitViewStyle(.balanced).tint(Color.accentColor)
+            .overlay(alignment: .bottom) { PadPlaybackBar(showPlayer: showPlayer) }
     }
     @ViewBuilder private var detail: some View {
         if category == "Settings" { SettingsView() }
+        else if category == "Search" { LibrarySearchView() }
         else { LibraryView(category: category ?? "Albums") }
     }
 }
@@ -169,14 +223,123 @@ struct MiniPlayer: View {
     }
 }
 struct MoreView: View {
+    @Binding var tabOrder: String
+    @State private var editing = false
+    private var remaining: [LibrarySection] { LibrarySection.allCases.filter { !LibrarySection.tabs(tabOrder).contains($0) } }
     var body: some View {
         List {
-            NavigationLink { LibraryView(category: "Playlists") } label: { Label("播放列表", systemImage: "music.note.list") }
-            NavigationLink { LibraryView(category: "Recent") } label: { Label("最近添加", systemImage: "clock") }
+            ForEach(remaining) { section in
+                NavigationLink { LibraryDestination(section: section) } label: {
+                    Label(section.title, systemImage: section.symbol)
+                }
+            }
             Section {
                 NavigationLink { SettingsView() } label: { Label("设置", systemImage: "gearshape") }
             }
         }.navigationTitle("更多")
+            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("编辑") { editing = true } } }
+            .sheet(isPresented: $editing) { TabEditor(tabOrder: $tabOrder) }
+    }
+}
+struct TabEditor: View {
+    @Binding var tabOrder: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedSlot = 0
+    private var tabs: [LibrarySection] { LibrarySection.tabs(tabOrder) }
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 28) {
+                    Text("选择一个底部位置，再点选分类；也可以把分类拖到该位置。")
+                        .font(.subheadline).foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        ForEach(Array(tabs.enumerated()), id: \.offset) { index, section in
+                            Button { selectedSlot = index } label: {
+                                item(section).frame(maxWidth: .infinity)
+                                    .padding(.vertical, 12)
+                                    .background(selectedSlot == index ? Color.accentColor.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 16))
+                            }.buttonStyle(.plain)
+                                .onDrag { NSItemProvider(object: section.rawValue as NSString) }
+                                .onDrop(of: [UTType.text], isTargeted: nil) { providers in
+                                    guard let provider = providers.first else { return false }
+                                    _ = provider.loadObject(ofClass: NSString.self) { object, _ in
+                                        guard let text = object as? String, let section = LibrarySection(rawValue: text) else { return }
+                                        DispatchQueue.main.async { assign(section, to: index) }
+                                    }
+                                    return true
+                                }
+                        }
+                    }
+                    Divider()
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 3), spacing: 28) {
+                        ForEach(LibrarySection.allCases) { section in
+                            Button { assign(section, to: selectedSlot) } label: {
+                                item(section).frame(maxWidth: .infinity).frame(height: 82)
+                            }.buttonStyle(.plain)
+                                .onDrag { NSItemProvider(object: section.rawValue as NSString) }
+                        }
+                    }
+                    Button("恢复默认 Tab") { tabOrder = LibrarySection.defaults.map(\.rawValue).joined(separator: ",") }
+                }.padding(24)
+            }.navigationTitle("编辑 Tab 栏").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+        }.tint(.accentColor)
+    }
+    private func item(_ section: LibrarySection) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: section.symbol).font(.system(size: 25))
+            Text(section.title).font(.caption)
+        }.foregroundStyle(Color.accentColor)
+    }
+    private func assign(_ section: LibrarySection, to index: Int) {
+        var result = tabs
+        if let existing = result.firstIndex(of: section) { result.swapAt(existing, index) }
+        else { result[index] = section }
+        tabOrder = result.map(\.rawValue).joined(separator: ",")
+    }
+}
+struct LibrarySearchView: View {
+    @EnvironmentObject var remote: RemoteClient
+    @State private var query = ""
+    private var term: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var songs: [RemoteTrack] {
+        remote.macTracks.filter { !$0.title.isEmpty && $0.title.localizedCaseInsensitiveContains(term) }
+    }
+    private var albums: [(String, [RemoteTrack])] {
+        Dictionary(grouping: remote.macTracks, by: albumKey).map { ($0.key, $0.value) }
+            .filter { $0.1.first?.album.localizedCaseInsensitiveContains(term) == true }.sorted { $0.0 < $1.0 }
+    }
+    private var artists: [(String, [RemoteTrack])] {
+        Dictionary(grouping: remote.macTracks, by: \.artist).map { ($0.key, $0.value) }
+            .filter { $0.0.localizedCaseInsensitiveContains(term) }.sorted { $0.0 < $1.0 }
+    }
+    private var playlists: [RemotePlaylist] { remote.playlists.filter { $0.name.localizedCaseInsensitiveContains(term) } }
+    var body: some View {
+        List {
+            if term.isEmpty {
+                ContentUnavailableView("搜索", systemImage: "magnifyingglass", description: Text("歌曲、艺人、专辑和播放列表"))
+            } else {
+                if !songs.isEmpty { Section("歌曲") { ForEach(songs) { MacTrackRow(track: $0, showArtwork: false) } } }
+                if !albums.isEmpty {
+                    Section("专辑") { ForEach(albums, id: \.0) { album in
+                        NavigationLink { TrackCollectionView(title: album.0, tracks: album.1) } label: {
+                            HStack { MacArtwork(id: album.1.first?.id, size: 44); Text(album.0).font(.subheadline) }
+                        }
+                    } }
+                }
+                if !artists.isEmpty { Section("艺人") { ForEach(artists, id: \.0) { artist in
+                    NavigationLink(artist.0) { ArtistAlbumsView(name: artist.0, tracks: artist.1) }
+                } } }
+                if !playlists.isEmpty { Section("播放列表") { ForEach(playlists) { playlist in
+                    NavigationLink(playlist.name) { MacPlaylistView(playlist: playlist) }
+                } } }
+                if songs.isEmpty && albums.isEmpty && artists.isEmpty && playlists.isEmpty {
+                    ContentUnavailableView.search(text: term)
+                }
+            }
+        }.listStyle(.plain).navigationTitle("搜索")
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "搜索")
+            .autocorrectionDisabled()
     }
 }
 struct SettingsView: View {
@@ -197,7 +360,7 @@ struct SettingsView: View {
             }
             Section("状态") { Text(remote.message).textSelection(.enabled) }
             Section("关于") {
-                LabeledContent("音乐遥控", value: "0.5.1")
+                LabeledContent("音乐遥控", value: "0.6.0")
                 Text("同一局域网免配对，可同时连接多台遥控设备。").font(.footnote)
             }
         }.navigationTitle("设置")
@@ -242,7 +405,7 @@ struct ConnectionView: View {
                 TextField("Mac 地址", text: $host).textInputAutocapitalization(.never).autocorrectionDisabled()
                 TextField("Mac 端口", text: $port).keyboardType(.numberPad)
                 Button("连接") { remote.connect(host: host, port: port) }.disabled(host.isEmpty || port.isEmpty)
-                Text("地址和端口见 Mac 端窗口。").font(.footnote).foregroundStyle(.secondary)
+                Text("地址和端口见 Mac 菜单栏面板。").font(.footnote).foregroundStyle(.secondary)
             }
             if remote.connected { Button("断开连接", role: .destructive) { remote.disconnect() } }
         }.navigationTitle("连接设置")
@@ -322,7 +485,10 @@ struct LibraryView: View {
                 List {
                     if remote.loadingLibrary || !remote.connected { loading.listRowSeparator(.hidden) }
                     if category == "Songs" {
-                        ForEach(songs) { MacTrackRow(track: $0, showArtwork: category != "Songs" && showArtwork, showArtist: showArtist, showAlbum: showAlbum, showDuration: showDuration, showRating: showRating) }
+                        ForEach(songs) { track in
+                            MacTrackRow(track: track, showArtwork: false, showArtist: showArtist, showAlbum: showAlbum, showDuration: showDuration, showRating: showRating)
+                                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
+                        }
                     } else if category == "Playlists" {
                         ForEach(remote.playlists.filter { (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search)) && (!favoritesOnly || $0.favorite == true) }.sorted { descending ? $0.name > $1.name : $0.name < $1.name }) { list in
                             NavigationLink { MacPlaylistView(playlist: list) } label: {
@@ -354,10 +520,9 @@ struct LibraryView: View {
                             }
                         }
                     }
-                }.listStyle(.plain)
+                }.listStyle(.plain).environment(\.defaultMinListRowHeight, 42)
             }
         }.navigationTitle(title)
-            .searchable(text: $search, prompt: remote.loadingLibrary ? "搜索已加载的 Mac 音乐" : "搜索 Mac 资料库")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -459,32 +624,31 @@ struct TrackCollectionView: View {
         }
     }
     var body: some View {
-        List {
-            Section {
-                Group {
-                    if sizeClass == .regular {
-                        HStack(alignment: .bottom, spacing: 30) {
-                            MacArtwork(id: tracks.first?.id, size: 240)
-                            information
-                            Spacer(minLength: 0)
-                        }.padding(.vertical, 20)
-                    } else {
-                        VStack(alignment: .leading, spacing: 24) {
-                            HStack { Spacer(); MacArtwork(id: tracks.first?.id, size: 240); Spacer() }
-                            information
-                        }.padding(.vertical, 12)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                if sizeClass == .regular {
+                    HStack(alignment: .bottom, spacing: 30) {
+                        MacArtwork(id: tracks.first?.id, size: 240)
+                        information.frame(maxWidth: .infinity, alignment: .leading)
+                    }.padding(.vertical, 20)
+                } else {
+                    VStack(alignment: .leading, spacing: 24) {
+                        HStack { Spacer(); MacArtwork(id: tracks.first?.id, size: 240); Spacer() }
+                        information
+                    }.padding(.vertical, 12)
+                }
+                if loading { ProgressView("正在读取播放列表……") }
+                LazyVStack(spacing: 0) {
+                    ForEach(sorted) { track in
+                        MacTrackRow(track: track, showArtwork: isPlaylist, showArtist: isPlaylist, showAlbum: false, showDuration: true)
+                            .padding(.vertical, 3)
+                        Divider()
                     }
-                }.listRowSeparator(.hidden)
-            }
-            if loading { ProgressView("正在读取播放列表……") }
-            ForEach(sorted) { track in
-                MacTrackRow(track: track, showArtwork: isPlaylist, showArtist: isPlaylist, showAlbum: false, showDuration: true)
-                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
-            }
-            Text("\(tracks.count) 首歌曲 · \(Int(tracks.reduce(0) { $0 + $1.duration }) / 60) 分钟")
-                .font(.footnote).foregroundStyle(.secondary).listRowSeparator(.hidden)
-        }.listStyle(.plain).contentMargins(.horizontal, sizeClass == .regular ? 28 : 16)
-            .navigationBarTitleDisplayMode(.inline)
+                }
+                Text("\(tracks.count) 首歌曲 · \(Int(tracks.reduce(0) { $0 + $1.duration }) / 60) 分钟")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }.padding(.horizontal, 24).padding(.bottom, sizeClass == .regular ? 110 : 24)
+        }.navigationBarTitleDisplayMode(.inline)
     }
     private var information: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -510,22 +674,43 @@ struct MacTrackRow: View {
     var showRating = false
     var body: some View {
         Button { remote.play(track) } label: {
-            HStack(spacing: 12) {
-                if showArtwork { MacArtwork(id: track.id, size: 48) }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(track.title).foregroundStyle(.primary).lineLimit(1)
-                    if sizeClass != .regular, showArtist || showAlbum { Text([showArtist ? track.artist : "", showAlbum ? track.album : ""].filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
-                    if showRating, let rating = track.rating { Text(rating == 0 ? "未评分" : String(repeating: "★", count: max(0, min(5, rating / 20)))).font(.caption).foregroundStyle(.secondary) }
-                }
-                .frame(maxWidth: sizeClass == .regular ? .infinity : nil, alignment: .leading)
-                Spacer(minLength: 4)
-                if sizeClass == .regular, showArtist { Text(track.artist).foregroundStyle(.secondary).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading) }
-                if showDuration { Text(String(format: "%d:%02d", Int(track.duration) / 60, Int(track.duration) % 60)).font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
-                if remote.playback.trackID == track.id { Image(systemName: "waveform").foregroundStyle(.pink) }
-            }.padding(.vertical, 3).contentShape(Rectangle())
+            GeometryReader { geometry in
+                let wide = sizeClass == .regular
+                let metadataWidth = geometry.size.width * (wide ? 0.48 : 0.44)
+                HStack(spacing: 10) {
+                    if showArtwork { MacArtwork(id: track.id, size: 36) }
+                    Text(track.title).font(.system(size: 14)).foregroundStyle(.primary).lineLimit(1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if showArtist || showAlbum {
+                        if wide {
+                            HStack(spacing: 16) {
+                                if showArtist { Text(track.artist).frame(maxWidth: .infinity, alignment: .leading) }
+                                if showAlbum { Text(track.album).frame(maxWidth: .infinity, alignment: .leading) }
+                            }.frame(width: metadataWidth)
+                                .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
+                        } else {
+                            Text([showArtist ? track.artist : "", showAlbum ? track.album : ""].filter { !$0.isEmpty }.joined(separator: " · "))
+                                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                                .frame(width: metadataWidth, alignment: .leading)
+                        }
+                    }
+                    if showRating, let rating = track.rating {
+                        Text(rating == 0 ? "—" : String(repeating: "★", count: max(0, min(5, rating / 20))))
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    if showDuration {
+                        Text(String(format: "%d:%02d", Int(track.duration) / 60, Int(track.duration) % 60))
+                            .font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary).frame(width: 38, alignment: .trailing)
+                    }
+                    if remote.playback.trackID == track.id {
+                        Image(systemName: "waveform").font(.caption).foregroundStyle(Color.accentColor)
+                    }
+                }.frame(width: geometry.size.width, height: 42, alignment: .leading).contentShape(Rectangle())
+            }.frame(height: 42)
         }.buttonStyle(.plain).disabled(!remote.connected)
     }
 }
+
 struct MacPlaylistView: View {
     @EnvironmentObject var remote: RemoteClient
     let playlist: RemotePlaylist
@@ -652,6 +837,11 @@ struct MusicSlider: View {
             ZStack(alignment: .leading) {
                 Capsule().fill(.white.opacity(0.18)).frame(height: dragging ? 8 : 4)
                 Capsule().fill(.white.opacity(0.65)).frame(width: max(4, geometry.size.width * fraction), height: dragging ? 8 : 4)
+                if dragging {
+                    Circle().fill(.white).frame(width: 18, height: 18)
+                        .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+                        .offset(x: min(max(geometry.size.width * fraction - 9, 0), max(geometry.size.width - 18, 0)))
+                }
             }.frame(height: 30).contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
                     if !dragging { dragging = true; onEditingChanged(true) }
