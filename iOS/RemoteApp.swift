@@ -360,7 +360,7 @@ struct SettingsView: View {
             }
             Section("状态") { Text(remote.message).textSelection(.enabled) }
             Section("关于") {
-                LabeledContent("音乐遥控", value: "0.6.0")
+                LabeledContent("音乐遥控", value: "0.6.1")
                 Text("同一局域网免配对，可同时连接多台遥控设备。").font(.footnote)
             }
         }.navigationTitle("设置")
@@ -520,7 +520,7 @@ struct LibraryView: View {
                             }
                         }
                     }
-                }.listStyle(.plain).environment(\.defaultMinListRowHeight, 42)
+                }.listStyle(.plain).environment(\.defaultMinListRowHeight, 46)
             }
         }.navigationTitle(title)
             .toolbar {
@@ -679,7 +679,7 @@ struct MacTrackRow: View {
                 let metadataWidth = geometry.size.width * (wide ? 0.48 : 0.44)
                 HStack(spacing: 10) {
                     if showArtwork { MacArtwork(id: track.id, size: 36) }
-                    Text(track.title).font(.system(size: 14)).foregroundStyle(.primary).lineLimit(1)
+                    Text(track.title).font(.system(size: 16)).foregroundStyle(.primary).lineLimit(1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     if showArtist || showAlbum {
                         if wide {
@@ -687,10 +687,10 @@ struct MacTrackRow: View {
                                 if showArtist { Text(track.artist).frame(maxWidth: .infinity, alignment: .leading) }
                                 if showAlbum { Text(track.album).frame(maxWidth: .infinity, alignment: .leading) }
                             }.frame(width: metadataWidth)
-                                .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
+                                .font(.system(size: 14)).foregroundStyle(.secondary).lineLimit(1)
                         } else {
                             Text([showArtist ? track.artist : "", showAlbum ? track.album : ""].filter { !$0.isEmpty }.joined(separator: " · "))
-                                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                                .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
                                 .frame(width: metadataWidth, alignment: .leading)
                         }
                     }
@@ -700,13 +700,13 @@ struct MacTrackRow: View {
                     }
                     if showDuration {
                         Text(String(format: "%d:%02d", Int(track.duration) / 60, Int(track.duration) % 60))
-                            .font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary).frame(width: 38, alignment: .trailing)
+                            .font(.system(size: 13).monospacedDigit()).foregroundStyle(.secondary).frame(width: 38, alignment: .trailing)
                     }
                     if remote.playback.trackID == track.id {
                         Image(systemName: "waveform").font(.caption).foregroundStyle(Color.accentColor)
                     }
-                }.frame(width: geometry.size.width, height: 42, alignment: .leading).contentShape(Rectangle())
-            }.frame(height: 42)
+                }.frame(width: geometry.size.width, height: 46, alignment: .leading).contentShape(Rectangle())
+            }.frame(height: 46)
         }.buttonStyle(.plain).disabled(!remote.connected)
     }
 }
