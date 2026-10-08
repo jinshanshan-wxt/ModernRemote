@@ -20,7 +20,7 @@ final class Companion: ObservableObject {
             listener.stateUpdateHandler = { [weak self, weak listener] state in
                 if case .ready = state {
                     self?.running = true; self?.message = "等待 iPhone 或 iPad 连接"
-                    let addresses = (Host.current().addresses ?? []).filter { !$0.contains(":") && $0 != "127.0.0.1" }
+                    let addresses = (Host.current().addresses).filter { !$0.contains(":") && $0 != "127.0.0.1" }
                     self?.connectionHint = "端口：\(listener?.port?.rawValue ?? 0)\nMac 地址：\(addresses.joined(separator: "、"))\n本机模拟器地址：127.0.0.1"
                 }
                 if case .failed(let error) = state { self?.stop(); self?.message = error.localizedDescription }
@@ -52,13 +52,17 @@ final class Companion: ObservableObject {
                     reply.tracks = page.0; reply.hasMore = page.1; reply.playlistID = request.playlistID
                 } else if request.action == "artwork", let id = request.artworkID {
                     reply.artworkID = id; reply.artwork = try self.music.artwork(id: id)
+                } else if request.action == "routes" {
+                    reply.routes = try self.music.audioRoutes()
+                } else if request.action == "route", let id = request.routeID {
+                    try self.music.selectAudioRoute(id)
+                    reply.routes = try self.music.audioRoutes()
                 } else if request.action == "playlists" {
                     reply.playlists = try self.music.playlists()
                 } else {
                     if request.action != "status" { try self.music.execute(request) }
                     self.playback = try self.music.status()
                     reply.playback = self.playback
-                    reply.queue = try? self.music.upcoming()
                 }
             } catch { reply.error = error.localizedDescription; self.message = error.localizedDescription }
             peer.send(reply)
@@ -76,6 +80,11 @@ final class Companion: ObservableObject {
 
 @main struct ModernRemoteMacApp: App {
     @StateObject private var model = Companion()
+    init() {
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let image = NSImage(contentsOf: url) {
+            NSApplication.shared.applicationIconImage = image
+        }
+    }
     var body: some Scene {
         WindowGroup("音乐遥控 · Mac") {
             VStack(alignment: .leading, spacing: 20) {

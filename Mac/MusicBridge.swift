@@ -1,12 +1,14 @@
 import Foundation
 import AppKit
+import CoreAudio
+import CryptoKit
 
 // NSAppleScript is executed serially on the main thread. Scripts consist only
 // of fixed commands plus escaped strings / validated numeric values.
 final class MusicBridge {
+    private var airDeviceIDs: [String: String] = [:]
+    private var localTrackIDs: Set<String>?
     private var artworkCache: [String: Data] = [:]
-    private var remoteQueue: [RemoteTrack] = []
-    private var queuePlaylistID: String?
 
     static func quote(_ value: String) -> String {
         "\"" + value.replacingOccurrences(of: "\\", with: "\\\\")
@@ -42,6 +44,12 @@ final class MusicBridge {
     func library(offset: Int, playlistID: String? = nil) throws -> ([RemoteTrack], Bool) {
         guard offset >= 0 && offset <= 1_000_000 else { throw failure("资料库分页位置无效，请重新加载。") }
         if let id = playlistID, !(id.count == 16 && id.allSatisfy({ $0.isHexDigit })) { throw failure("播放列表 ID 无效。") }
+        if offset == 0 || localTrackIDs == nil {
+            // Do not expose filesystem paths; only publish whether a Music file track has a location.
+            if let ids = try? run("get persistent ID of (file tracks of library playlist 1 whose location is not missing value)") {
+                localTrackIDs = Set((0..<ids.numberOfItems).compactMap { ids.atIndex($0 + 1)?.stringValue })
+            }
+        }
         let source = playlistID.map { "(first user playlist whose persistent ID is \(Self.quote($0)))" } ?? "library playlist 1"
         let result = try run("""
         tell \(source)
@@ -49,7 +57,7 @@ final class MusicBridge {
             set lastIndex to \(offset + 200)
             if lastIndex > total then set lastIndex to total
             if \(offset + 1) > total then return {{}, total}
-            set output to {persistent ID, name, artist, album, duration, genre, album artist, track number, date added} of tracks \(offset + 1) thru lastIndex
+            set output to {persistent ID, name, artist, album, duration, genre, album artist, track number, date added, favorited, album favorited, played count, year, rating, album rating, disc number} of tracks \(offset + 1) thru lastIndex
             return {output, total}
         end tell
         """)
@@ -64,7 +72,11 @@ final class MusicBridge {
                     artist: field(3)?.stringValue ?? "", album: field(4)?.stringValue ?? "",
                     duration: number(field(5)), dateAdded: field(9)?.dateValue?.timeIntervalSince1970 ?? 0,
                     genre: field(6)?.stringValue ?? "", albumArtist: field(7)?.stringValue ?? "",
-                    trackNumber: Int(field(8)?.int32Value ?? 0), macID: id))
+                    trackNumber: Int(field(8)?.int32Value ?? 0),
+                    favorite: field(10)?.booleanValue, albumFavorite: field(11)?.booleanValue,
+                    playCount: field(12).map { Int($0.int32Value) }, year: field(13).map { Int($0.int32Value) },
+                    rating: field(14).map { Int($0.int32Value) }, albumRating: field(15).map { Int($0.int32Value) },
+                    downloaded: localTrackIDs.map { $0.contains(id) }, discNumber: field(16).map { Int($0.int32Value) }, macID: id))
             }
         }
         return (tracks, offset + tracks.count < Int(result.atIndex(2)?.int32Value ?? 0))
@@ -73,14 +85,14 @@ final class MusicBridge {
         let rows = try run("""
         set output to {}
         repeat with p in user playlists
-            set end of output to {persistent ID of p, name of p}
+            set end of output to {persistent ID of p, name of p, count of tracks of p, favorited of p}
         end repeat
         return output
         """)
         guard rows.numberOfItems > 0 else { return [] }
         return (1...rows.numberOfItems).compactMap { i in
             guard let row = rows.atIndex(i), let id = row.atIndex(1)?.stringValue else { return nil }
-            return RemotePlaylist(id: id, name: row.atIndex(2)?.stringValue ?? "")
+            return RemotePlaylist(id: id, name: row.atIndex(2)?.stringValue ?? "", trackCount: row.atIndex(3).map { Int($0.int32Value) }, favorite: row.atIndex(4)?.booleanValue)
         }
     }
     func artwork(id: String) throws -> Data? {
@@ -100,23 +112,12 @@ final class MusicBridge {
         artworkCache[id] = data
         return data
     }
-    func upcoming() throws -> [RemoteTrack]? {
-        guard let id = queuePlaylistID else { return nil }
-        let state = try run("""
-        if player state is stopped then return {"", "", true}
-        return {persistent ID of current playlist, persistent ID of current track, shuffle enabled}
-        """)
-        guard state.atIndex(1)?.stringValue == id, state.atIndex(3)?.booleanValue == false,
-              let current = state.atIndex(2)?.stringValue,
-              let index = remoteQueue.firstIndex(where: { $0.id == current }) else { return nil }
-        return Array(remoteQueue.dropFirst(index + 1))
-    }
     private func playQueue(_ tracks: [RemoteTrack]) throws {
         guard !tracks.isEmpty, tracks.count <= 1000,
               tracks.allSatisfy({ $0.id.count == 16 && $0.id.allSatisfy({ $0.isHexDigit }) }) else { throw failure("队列最多支持 1000 首 Mac 歌曲。") }
         // A dedicated native playlist lets Music advance naturally while the phone sleeps.
         let ids = tracks.map { Self.quote($0.id) }.joined(separator: ",")
-        let result = try run("""
+        _ = try run("""
         set p to make new user playlist with properties {name:"音乐遥控 · " & (current date as string)}
         repeat with trackID in {\(ids)}
             duplicate (first track of library playlist 1 whose persistent ID is (trackID as string)) to p
@@ -126,7 +127,55 @@ final class MusicBridge {
         play p
         return persistent ID of p
         """)
-        queuePlaylistID = result.stringValue; remoteQueue = tracks
+    }
+    func audioRoutes() throws -> [AudioRoute] {
+        let result = try run("""
+        set output to {}
+        repeat with d in AirPlay devices
+            if supports audio of d then
+                set end of output to {(id of d) as string, name of d, (kind of d) as string, selected of d, available of d, protected of d, network address of d}
+            end if
+        end repeat
+        return output
+        """)
+        var air: [AudioRoute] = []
+        airDeviceIDs = [:]
+        for i in 0..<result.numberOfItems {
+            guard let row = result.atIndex(i + 1), let id = row.atIndex(1)?.stringValue else { continue }
+            let name = row.atIndex(2)?.stringValue ?? "AirPlay"
+            let address = row.atIndex(7)?.stringValue ?? ""
+            let identity = address.isEmpty ? name + "|" + (row.atIndex(3)?.stringValue ?? "") : address.lowercased()
+            let stableID = "air:" + SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
+            airDeviceIDs[stableID] = id
+            air.append(AudioRoute(id: stableID, name: name,
+                kind: row.atIndex(3)?.stringValue ?? "AirPlay", selected: row.atIndex(4)?.booleanValue ?? false,
+                available: row.atIndex(5)?.booleanValue ?? false, requiresPassword: row.atIndex(6)?.booleanValue ?? false))
+        }
+        let localSelected = air.contains { $0.kind == "computer" && $0.selected }
+        let local = CoreAudioOutputs.routes(selected: localSelected)
+        return local + air.filter { local.isEmpty || $0.kind != "computer" }
+    }
+    func selectAudioRoute(_ id: String) throws {
+        guard let route = try audioRoutes().first(where: { $0.id == id }), route.available else {
+            throw failure("此音频输出已不可用，请刷新设备列表。")
+        }
+        if route.isSystem {
+            guard let device = UInt32(id.dropFirst(5)) else { throw failure("音频设备无效。") }
+            let previous = CoreAudioOutputs.defaultDevice()
+            try CoreAudioOutputs.select(device)
+            do { _ = try run("set current AirPlay devices to {first AirPlay device whose kind is computer}") }
+            catch { if let previous { try? CoreAudioOutputs.select(previous) }; throw error }
+        } else {
+            guard let deviceID = airDeviceIDs[id] else { throw failure("AirPlay 设备已断开。") }
+            _ = try run("""
+            set chosen to missing value
+            repeat with d in AirPlay devices
+                if (id of d as string) is \(Self.quote(deviceID)) then set chosen to contents of d
+            end repeat
+            if chosen is missing value then error "AirPlay 设备已断开"
+            set current AirPlay devices to {chosen}
+            """)
+        }
     }
     func execute(_ packet: Packet) throws {
         switch packet.action {
@@ -173,4 +222,44 @@ final class MusicBridge {
         }
     }
     private func failure(_ text: String) -> Error { NSError(domain: "ModernRemote", code: 1, userInfo: [NSLocalizedDescriptionKey: text]) }
+}
+
+// Controls the Mac's default media output, never the iPhone audio session.
+enum CoreAudioOutputs {
+    private static func address(_ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> AudioObjectPropertyAddress {
+        AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+    }
+    static func defaultDevice() -> AudioDeviceID? {
+        var a = address(kAudioHardwarePropertyDefaultOutputDevice)
+        var id: AudioDeviceID = 0; var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        return AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, &size, &id) == noErr ? id : nil
+    }
+    static func routes(selected: Bool) -> [AudioRoute] {
+        var a = address(kAudioHardwarePropertyDevices); var size: UInt32 = 0
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        guard AudioObjectGetPropertyDataSize(system, &a, 0, nil, &size) == noErr else { return [] }
+        var ids = [AudioDeviceID](repeating: 0, count: Int(size) / MemoryLayout<AudioDeviceID>.size)
+        guard AudioObjectGetPropertyData(system, &a, 0, nil, &size, &ids) == noErr else { return [] }
+        let current = defaultDevice()
+        return ids.compactMap { id in
+            var streams = address(kAudioDevicePropertyStreams, kAudioDevicePropertyScopeOutput); var streamSize: UInt32 = 0
+            guard AudioObjectGetPropertyDataSize(id, &streams, 0, nil, &streamSize) == noErr, streamSize > 0 else { return nil }
+            var name: Unmanaged<CFString>? = nil; var nameSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+            var nameAddress = address(kAudioObjectPropertyName)
+            let result = withUnsafeMutablePointer(to: &name) { AudioObjectGetPropertyData(id, &nameAddress, 0, nil, &nameSize, $0) }
+            guard result == noErr, let name = name?.takeRetainedValue() else { return nil }
+            var alive: UInt32 = 0; var aliveSize = UInt32(MemoryLayout<UInt32>.size)
+            var aliveAddress = address(kAudioDevicePropertyDeviceIsAlive)
+            _ = AudioObjectGetPropertyData(id, &aliveAddress, 0, nil, &aliveSize, &alive)
+            return AudioRoute(id: "core:\(id)", name: name as String, kind: "system", selected: selected && id == current, available: alive != 0)
+        }
+    }
+    static func select(_ id: AudioDeviceID) throws {
+        guard routes(selected: false).contains(where: { $0.id == "core:\(id)" && $0.available }) else {
+            throw NSError(domain: "CoreAudio", code: -1, userInfo: [NSLocalizedDescriptionKey: "输出设备已断开。"])
+        }
+        var a = address(kAudioHardwarePropertyDefaultOutputDevice); var value = id
+        let status = AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, UInt32(MemoryLayout<AudioDeviceID>.size), &value)
+        guard status == noErr else { throw NSError(domain: "CoreAudio", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "无法切换 Mac 音频输出（\(status)）。"]) }
+    }
 }

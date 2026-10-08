@@ -23,7 +23,7 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>为已配对的 iPhone 读取 Mac 音乐资料库，并控制“音乐”应用的播放。</string>
+	<string>读取 Mac 音乐资料库，控制播放并选择 AirPlay 扬声器。</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_modernremote._tcp</string>
@@ -32,5 +32,7 @@
 	<string>通过局域网连接 iPhone 和 Mac，浏览 Mac 资料库并遥控音乐播放。</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon.icns</string>
 </dict>
 </plist>

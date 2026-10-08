@@ -1,4 +1,4 @@
-# Modern Remote 0.3.0
+# Modern Remote 0.4.0
 
 <img src="Assets/Mac-Icon-1024.png" width="128" alt="Modern Remote Mac icon">
 
@@ -18,16 +18,20 @@ Chinese guide: `README.zh-CN.txt` (strict GBK). Swift/project/configuration file
 
 - Mac library: automatic 200-track pages; artist/album/genre groups; recent additions sorted by Mac date-added; ascending/descending sorting; Mac user playlists and their tracks. Album grouping uses album artist when available. Empty genre becomes uncategorized.
 - Artwork: fetched on demand from Music.app artwork data, resized to 320px and cached in memory. No catalog lookup. If Music does not expose the artwork, a placeholder remains. Covers available only inside Apple's streaming interface are not guaranteed.
-- Navigation on iPhone and iPad: five tabs for Artists, Albums, Songs, Genres and More. More contains Playlists, Recently Added and Settings. Mac library selection, connection management and reload live in Settings. Albums use an adaptive artwork grid, artists open their albums. A floating mini-player above the tabs opens the artwork-led Now Playing sheet. iOS 26 uses the native tab-bar accessory; older versions use an inset mini-player. All main labels are Simplified Chinese.
+- Navigation on iPhone and iPad: five tabs for Artists, Albums, Songs, Genres and More. More contains Playlists, Recently Added and Settings. Mac library selection, connection management and reload live in Settings. Albums use an adaptive artwork grid, artists open their albums. A floating mini-player above the tabs opens the artwork-led full-screen Now Playing page. iOS 26 uses the native tab-bar accessory; older versions use an inset mini-player. All main labels are Simplified Chinese.
 - Playback status: polls every two seconds while active. Multiple clients receive the same Mac status. Music keeps playing when the phone sleeps.
 - Connection: Bonjour discovery with restart, manual address/port fallback, automatic retry, remembered preferred Mac. Mac must be awake and sharing. Guest-Wi-Fi isolation/firewalls may prevent access. Discovery cannot determine whether two devices literally use the same Wi-Fi SSID; it operates on the reachable LAN.
 - **Open LAN mode:** requested zero-pairing mode uses unauthenticated, unencrypted TCP. Any device able to reach the listener can browse/control Music while sharing is on. Stop sharing to close every connection. No claim of encrypted pairing is made.
-- **Up Next:** Music.app's complete existing Up Next queue is not exposed by this implementation. “按顺序播放” explicitly creates a new, dated `音乐遥控` playlist in Mac Music and plays it with shuffle/repeat disabled. The player shows subsequent tracks from that app-created playlist only. Tracks manually inserted into native Up Next are not included. Native random playback or switching to another playlist hides this view. Each explicit ordered-play request creates a playlist visible on Mac; maximum 1000 tracks. Individual song taps do not replace a whole album queue.
+- Now Playing: artwork-colored blurred background, thin progress/volume sliders and playback controls. iPad uses the full screen, with cover and controls side by side in landscape. Hostnames, computer badges and Up Next have been removed from this page.
+- Filters and display options: All / Favorites, nested sorting and ascending/descending order, saved separately for each category. Songs support title, play count, genre, duration, favorite, artist, downloaded status and album; albums support title, artist, year and rating. Display options include album grid/list and cover size, artwork, artist, album, duration, rating and playlist track counts where applicable. Values come from Mac metadata. Artist favorites are unavailable in Music's scripting interface, so that filter is disabled with an explanation; song, album and playlist favorites are supported. Genres sort by title. Unknown metadata sorts last.
+- AirPlay/output: the picker controls Mac Music's discovered AirPlay devices (including HomePod) and CoreAudio local outputs (built-in speakers, connected display/USB devices). Selecting a local output also changes Mac's default system output. This prototype selects one destination at a time. Password-protected destinations may require verification on Mac. It does not display the iPhone's audio routes. Device discovery and availability are controlled by Mac Music/macOS.
+- Up Next has no UI or remote queue response. **Ordered album/collection playback** remains available: it creates a dated `音乐遥控` user playlist in Mac Music and plays it with shuffle/repeat disabled, up to 1000 tracks. Individual song taps play the selected Mac track. Existing native Up Next contents cannot be fully read or edited by this prototype.
+- Mac icon: an independent rounded, transparent-margin ICNS is explicitly packaged and loaded, separate from the iOS asset catalog. Installation does not alter Dock caches or preferences.
 - Library loading is a snapshot, not live synchronization. Very large libraries use memory on iOS and synchronous AppleScript on Mac; changes during pagination may require refresh. No playlist editing, playlist-folder hierarchy mirroring, DRM extraction, or complete native Up Next editing.
 
 ## API and permissions
 
-Native Mac playback uses Music.app's installed AppleScript dictionary. It does not pretend iOS SystemMusicPlayer controls a remote Mac. See [Apple SystemMusicPlayer documentation](https://developer.apple.com/documentation/musickit/systemmusicplayer) and [Apple's MusicKit session](https://developer.apple.com/videos/play/wwdc2026/254/) for the distinction between app playback and system playback queues.
+Native Mac playback uses Music.app's installed AppleScript dictionary. It does not pretend iOS SystemMusicPlayer controls a remote Mac. MusicKit on the phone is not used to read the Mac library. The Mac companion uses Music's installed scripting dictionary plus CoreAudio for local output selection.
 
 - Mac: Apple Events Automation entitlement and usage description; Hardened Runtime, no App Sandbox in this prototype.
 - iPhone/iPad: Bonjour service `_modernremote._tcp` and Local Network usage description; no MusicKit entitlement or Music Library authorization.
@@ -47,7 +51,7 @@ Releases include an ad-hoc-signed Apple-silicon Mac ZIP, unsigned iOS IPA and co
 
 ## Validation
 
-Both native Release targets and the iOS Simulator target compile with Xcode 26.3. Protocol checks exercise Unicode framing, size/version rejection, AppleScript argument escaping and two concurrent no-pairing LAN clients. Live Mac checks retrieved song pages, playlists, playlist tracks, date-added metadata, artwork bytes and playback state. Signed physical-device installation and exhaustive huge-library/background behavior remain device acceptance checks.
+Both native Release targets and the iOS Simulator target compile with Xcode 26.3. Protocol checks exercise Unicode framing, size/version rejection, AppleScript argument escaping and two concurrent no-pairing LAN clients. Live Mac checks retrieved song pages, playlists, playlist tracks, date-added metadata, artwork bytes and playback state. Version 0.4 additionally verifies metadata sorting/missing values, Mac play counts/favorites/year/rating/downloaded flags, and real switching between HomePod, built-in speakers and display audio (restoring the original output). Full-screen player layouts were inspected on iPad Pro M4 and iPhone 17 Pro Max simulators. Signed physical-device installation and exhaustive huge-library/background behavior remain device acceptance checks.
 
 ## Troubleshooting
 
@@ -55,4 +59,4 @@ Both native Release targets and the iOS Simulator target compile with Xcode 26.3
 - Automation error: System Settings → Privacy & Security → Automation → allow Music control.
 - Missing artwork: refresh the library and verify Music itself exposes artwork for the track.
 - Cloud track unavailable: Music.app must have the required account/subscription and network access to play it.
-- No full Up Next: the native queue is an API limitation, not a library permission problem. See the explicit app-playlist fallback above.
+- Missing AirPlay destination: confirm it is visible and available in Mac Music, then refresh the output picker. Local output selection changes system audio, including other apps.

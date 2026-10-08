@@ -16,6 +16,18 @@ import Network
         do { _ = try invalid.append(Data("{\"version\":2,\"id\":\"1\",\"action\":\"status\"}\n".utf8)); fatalError("Unknown version accepted") }
         catch ProtocolError.version {} catch { fatalError("Wrong error") }
         precondition(MusicBridge.quote("a\"\\b\n") == "\"a\\\"\\\\b\\n\"")
+        let unknown = RemoteTrack(id: "u", title: "Unknown", artist: "A", album: "X", duration: 100)
+        var low = unknown; low.id = "l"; low.playCount = 1; low.year = 1999; low.downloaded = false
+        var high = unknown; high.id = "h"; high.playCount = 99; high.year = 2020; high.downloaded = true
+        precondition(LibrarySorting.less([low], [high], order: .plays, descending: false, context: "Songs"))
+        precondition(LibrarySorting.less([high], [low], order: .plays, descending: true, context: "Songs"))
+        for direction in [false, true] {
+            precondition(LibrarySorting.less([low], [unknown], order: .plays, descending: direction, context: "Songs"))
+            precondition(!LibrarySorting.less([unknown], [low], order: .plays, descending: direction, context: "Songs"))
+        }
+        precondition(LibrarySorting.less([low], [high], order: .year, descending: false, context: "Albums"))
+        precondition(LibrarySorting.less([high], [low], order: .downloaded, descending: true, context: "Songs"))
+        print("PASS: real metadata ordering, ascending/descending and unknowns last")
         print("PASS: fragmented/coalesced Unicode frames, size/version limits, escaping")
         lanTest { print("PASS: all tests"); exit(0) }
         dispatchMain()

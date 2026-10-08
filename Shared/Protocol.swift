@@ -10,11 +10,30 @@ struct RemoteTrack: Codable, Identifiable, Hashable {
     var genre: String = ""
     var albumArtist: String = ""
     var trackNumber: Int = 0
+    var favorite: Bool? = nil
+    var albumFavorite: Bool? = nil
+    var playCount: Int? = nil
+    var year: Int? = nil
+    var rating: Int? = nil
+    var albumRating: Int? = nil
+    var downloaded: Bool? = nil
+    var discNumber: Int? = nil
     var macID: String? = nil
 }
 struct RemotePlaylist: Codable, Identifiable {
     var id: String
     var name: String
+    var trackCount: Int? = nil
+    var favorite: Bool? = nil
+}
+struct AudioRoute: Codable, Identifiable, Equatable {
+    var id: String
+    var name: String
+    var kind: String
+    var selected: Bool
+    var available: Bool
+    var requiresPassword: Bool = false
+    var isSystem: Bool { id.hasPrefix("core:") }
 }
 struct Playback: Codable {
     var trackID: String? = nil
@@ -37,7 +56,8 @@ struct Packet: Codable {
     var playback: Playback? = nil
     var artworkID: String? = nil
     var artwork: Data? = nil
-    var queue: [RemoteTrack]? = nil
+    var routes: [AudioRoute]? = nil
+    var routeID: String? = nil
     var playlists: [RemotePlaylist]? = nil
     var playlistID: String? = nil
     var error: String? = nil
@@ -61,3 +81,78 @@ struct LineDecoder {
     }
 }
 enum ProtocolError: Error { case oversized, version }
+
+// Unknown metadata stays last in either direction; ties have a stable ID order.
+enum LibrarySort: String, CaseIterable {
+    case title, plays, genre, duration, favorite, artist, downloaded, album, year, rating, added
+    var title: String {
+        switch self {
+        case .title: return "标题"
+        case .plays: return "播放次数"
+        case .genre: return "类型"
+        case .duration: return "时长"
+        case .favorite: return "喜爱"
+        case .artist: return "艺人"
+        case .downloaded: return "云端下载"
+        case .album: return "专辑"
+        case .year: return "年份"
+        case .rating: return "评分"
+        case .added: return "添加日期"
+        }
+    }
+    static func options(for category: String) -> [Self] {
+        switch category {
+        case "Albums": return [.title, .artist, .year, .rating]
+        case "Artists": return [.title]
+        case "Genres", "Playlists": return [.title]
+        case "Recent": return [.added, .title, .plays, .genre, .duration, .favorite, .artist, .downloaded, .album, .year, .rating]
+        default: return [.title, .plays, .genre, .duration, .favorite, .artist, .downloaded, .album]
+        }
+    }
+}
+enum LibrarySorting {
+    static func less(_ left: [RemoteTrack], _ right: [RemoteTrack], order: LibrarySort, descending: Bool,
+                     context: String, leftTitle: String? = nil, rightTitle: String? = nil) -> Bool {
+        func text(_ tracks: [RemoteTrack], _ groupTitle: String?) -> String {
+            guard let first = tracks.first else { return "" }
+            switch order {
+            case .artist: return first.albumArtist.isEmpty ? first.artist : first.albumArtist
+            case .album: return first.album
+            case .genre: return first.genre
+            default: return groupTitle ?? first.title
+            }
+        }
+        func numeric(_ tracks: [RemoteTrack]) -> Double? {
+            switch order {
+            case .plays:
+                let values = tracks.compactMap(\.playCount); return values.isEmpty ? nil : Double(values.reduce(0, +))
+            case .duration: return tracks.reduce(0) { $0 + $1.duration }
+            case .favorite:
+                let values = tracks.compactMap { context == "Albums" ? $0.albumFavorite : $0.favorite }
+                return values.isEmpty ? nil : (values.contains(true) ? 1 : 0)
+            case .downloaded:
+                let values = tracks.compactMap(\.downloaded); return values.isEmpty ? nil : (values.allSatisfy { $0 } ? 1 : 0)
+            case .year: return tracks.compactMap(\.year).filter { $0 > 0 }.min().map(Double.init)
+            case .rating: return tracks.compactMap { context == "Albums" ? $0.albumRating : $0.rating }.max().map(Double.init)
+            case .added: return tracks.map(\.dateAdded).max()
+            default: return nil
+            }
+        }
+        let comparison: ComparisonResult
+        if [.plays, .duration, .favorite, .downloaded, .year, .rating, .added].contains(order) {
+            let a = numeric(left), b = numeric(right)
+            if a == nil && b != nil { return false }
+            if a != nil && b == nil { return true }
+            comparison = a == b ? .orderedSame : ((a ?? 0) < (b ?? 0) ? .orderedAscending : .orderedDescending)
+        } else {
+            comparison = text(left, leftTitle).localizedStandardCompare(text(right, rightTitle))
+        }
+        if comparison == .orderedSame {
+            let a = leftTitle ?? left.first?.title ?? "", b = rightTitle ?? right.first?.title ?? ""
+            let titleOrder = a.localizedStandardCompare(b)
+            if titleOrder == .orderedSame { return (left.first?.id ?? "") < (right.first?.id ?? "") }
+            return titleOrder == .orderedAscending
+        }
+        return comparison == (descending ? .orderedDescending : .orderedAscending)
+    }
+}
