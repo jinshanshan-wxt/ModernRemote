@@ -30,12 +30,13 @@ final class MusicBridge {
         let result = try run("""
         set v to sound volume
         set s to player state as string
-        if s is "stopped" then return {"尚未播放", "", s, 0, 0, v}
-        return {name of current track, artist of current track, s, player position, duration of current track, v, persistent ID of current track}
+        if s is "stopped" then return {"尚未播放", "", s, 0, 0, v, missing value, shuffle enabled, song repeat as string}
+        return {name of current track, artist of current track, s, player position, duration of current track, v, persistent ID of current track, shuffle enabled, song repeat as string}
         """)
         return Playback(trackID: result.atIndex(7)?.stringValue, title: result.atIndex(1)?.stringValue ?? "", artist: result.atIndex(2)?.stringValue ?? "",
                         playing: result.atIndex(3)?.stringValue == "playing",
-                        position: number(result.atIndex(4)), duration: number(result.atIndex(5)), volume: number(result.atIndex(6)))
+                        position: number(result.atIndex(4)), duration: number(result.atIndex(5)), volume: number(result.atIndex(6)),
+                        shuffle: result.atIndex(8)?.booleanValue, repeatMode: result.atIndex(9)?.stringValue == "all" ? 1 : result.atIndex(9)?.stringValue == "one" ? 2 : 0)
     }
     private func number(_ item: NSAppleEventDescriptor?) -> Double {
         guard let item else { return 0 }
@@ -133,7 +134,7 @@ final class MusicBridge {
         set output to {}
         repeat with d in AirPlay devices
             if supports audio of d then
-                set end of output to {(id of d) as string, name of d, (kind of d) as string, selected of d, available of d, protected of d, network address of d}
+                set end of output to {(id of d) as string, name of d, (kind of d) as string, selected of d, available of d, protected of d, network address of d, active of d}
             end if
         end repeat
         return output
@@ -149,7 +150,7 @@ final class MusicBridge {
             airDeviceIDs[stableID] = id
             air.append(AudioRoute(id: stableID, name: name,
                 kind: row.atIndex(3)?.stringValue ?? "AirPlay", selected: row.atIndex(4)?.booleanValue ?? false,
-                available: row.atIndex(5)?.booleanValue ?? false, requiresPassword: row.atIndex(6)?.booleanValue ?? false))
+                available: row.atIndex(5)?.booleanValue ?? false, requiresPassword: row.atIndex(6)?.booleanValue ?? false, active: row.atIndex(8)?.booleanValue))
         }
         let localSelected = air.contains { $0.kind == "computer" && $0.selected }
         let local = CoreAudioOutputs.routes(selected: localSelected)
@@ -173,12 +174,28 @@ final class MusicBridge {
                 if (id of d as string) is \(Self.quote(deviceID)) then set chosen to contents of d
             end repeat
             if chosen is missing value then error "AirPlay 设备已断开"
+            set needsAudio to player state is playing
+            set selected of chosen to true
             set current AirPlay devices to {chosen}
+            if needsAudio and player state is not playing then play
+            repeat 40 times
+                if selected of chosen then
+                    if not needsAudio or active of chosen then return true
+                end if
+                delay 0.25
+            end repeat
+            error "音频输出没有连接成功，请在 Mac 音乐中检查此设备或连接验证。"
             """)
         }
     }
     func execute(_ packet: Packet) throws {
         switch packet.action {
+        case "shuffle":
+            guard packet.value == 0 || packet.value == 1 else { throw failure("随机播放设置无效。") }
+            _ = try run("set shuffle enabled to " + (packet.value == 1 ? "true" : "false"))
+        case "repeat":
+            guard let value = packet.value, [0.0, 1.0, 2.0].contains(value) else { throw failure("循环播放设置无效。") }
+            _ = try run("set song repeat to " + (value == 0 ? "off" : value == 1 ? "all" : "one"))
         case "queue": try playQueue(packet.tracks ?? [])
         case "play": _ = try run("play")
         case "pause": _ = try run("pause")

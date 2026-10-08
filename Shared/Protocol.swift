@@ -33,6 +33,7 @@ struct AudioRoute: Codable, Identifiable, Equatable {
     var selected: Bool
     var available: Bool
     var requiresPassword: Bool = false
+    var active: Bool? = nil
     var isSystem: Bool { id.hasPrefix("core:") }
 }
 struct Playback: Codable {
@@ -43,6 +44,8 @@ struct Playback: Codable {
     var position: Double = 0
     var duration: Double = 0
     var volume: Double = 50
+    var shuffle: Bool? = nil
+    var repeatMode: Int? = nil
 }
 struct Packet: Codable {
     var version = 1
@@ -105,7 +108,7 @@ enum LibrarySort: String, CaseIterable {
         case "Albums": return [.title, .artist, .year, .rating]
         case "Artists": return [.title]
         case "Genres", "Playlists": return [.title]
-        case "Recent": return [.added, .title, .plays, .genre, .duration, .favorite, .artist, .downloaded, .album, .year, .rating]
+        case "Recent": return [.added, .title, .artist, .year]
         default: return [.title, .plays, .genre, .duration, .favorite, .artist, .downloaded, .album]
         }
     }
@@ -154,5 +157,20 @@ enum LibrarySorting {
             return titleOrder == .orderedAscending
         }
         return comparison == (descending ? .orderedDescending : .orderedAscending)
+    }
+}
+
+// Playback and output changes must not wait behind a screenful of artwork requests.
+struct RequestQueue {
+    private var packets: [Packet] = []
+    var isEmpty: Bool { packets.isEmpty }
+    mutating func append(_ packet: Packet) {
+        if packet.action == "status", packets.contains(where: { $0.action == "status" }) { return }
+        packets.append(packet)
+    }
+    mutating func removeFirst() -> Packet {
+        let background = Set(["library", "artwork", "playlists"])
+        let index = packets.firstIndex { !background.contains($0.action) } ?? 0
+        return packets.remove(at: index)
     }
 }

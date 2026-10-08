@@ -29,6 +29,18 @@ import Network
         precondition(LibrarySorting.less([high], [low], order: .downloaded, descending: true, context: "Songs"))
         print("PASS: real metadata ordering, ascending/descending and unknowns last")
         print("PASS: fragmented/coalesced Unicode frames, size/version limits, escaping")
+        var addedLater = low; addedLater.dateAdded = 300
+        var addedEarlier = high; addedEarlier.dateAdded = 100
+        precondition(LibrarySorting.less([low, addedLater], [addedEarlier], order: .added, descending: true, context: "Recent"))
+        print("PASS: recently added albums use newest track date, descending")
+        var requests = RequestQueue()
+        for _ in 0..<100 { requests.append(Packet(action: "artwork")) }
+        requests.append(Packet(action: "route", routeID: "air:test"))
+        requests.append(Packet(action: "pause"))
+        precondition(requests.removeFirst().action == "route")
+        precondition(requests.removeFirst().action == "pause")
+        precondition(requests.removeFirst().action == "artwork")
+        print("PASS: AirPlay/playback controls bypass 100 queued artwork requests, preserving control order")
         lanTest { print("PASS: all tests"); exit(0) }
         dispatchMain()
     }

@@ -14,6 +14,7 @@ final class RemoteClient: ObservableObject {
     @Published var artwork: [String: Data] = [:]
     @Published var routes: [AudioRoute] = []
     @Published var routeMessage = ""
+    @Published var selectingRouteID: String? = nil
     private var requestedArtwork: Set<String> = []
     @Published var playlists: [RemotePlaylist] = []
     @Published var playlistTracks: [String: [RemoteTrack]] = [:]
@@ -25,7 +26,7 @@ final class RemoteClient: ObservableObject {
     private var wire: Wire?
     private var pendingAction: String?
     private var pending: String?
-    private var deferred: [Packet] = []
+    private var deferred = RequestQueue()
     private var timeout: DispatchWorkItem?
     private var timer: AnyCancellable?
     func discover(restart: Bool = false) {
@@ -78,15 +79,16 @@ final class RemoteClient: ObservableObject {
             self.macName = name; self.connecting = false; self.connected = true; self.message = "已连接到 \(name)"
             self.reloadLibrary()
             self.timer = Timer.publish(every: 2, on: .main, in: .common).autoconnect().sink { [weak self] _ in
-                guard let self, !self.busy else { return }
+                guard let self else { return }
                 self.send(Packet(action: "status"))
             }
         }
         peer.onClose = { [weak self] reason in
             guard let self else { return }
+            self.selectingRouteID = nil; self.routeMessage = reason
             self.connecting = false; self.connected = false; self.loadingLibrary = false; self.busy = false; self.pending = nil
             self.timeout?.cancel(); self.timer = nil; self.message = reason
-            self.wire = nil; self.deferred = []
+            self.wire = nil; self.deferred = RequestQueue()
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in self?.autoConnect() }
         }
         peer.onPacket = { [weak self] packet in
@@ -99,7 +101,13 @@ final class RemoteClient: ObservableObject {
                 if let id = playback.trackID { self.loadArtwork(id) }
             }
             if let id = packet.artworkID, let data = packet.artwork { self.artwork[id] = data }
-            if let routes = packet.routes { self.routes = routes; self.routeMessage = "" }
+            if let routes = packet.routes {
+                self.routes = routes
+                if requestAction == "route", let selectedID = self.selectingRouteID {
+                    self.routeMessage = routes.contains { $0.id == selectedID && $0.selected } ? "" : "Mac 尚未确认此输出，请刷新或重试。"
+                } else if self.selectingRouteID == nil { self.routeMessage = "" }
+            }
+            if requestAction == "route" { self.selectingRouteID = nil }
             if let error = packet.error, requestAction == "routes" || requestAction == "route" { self.routeMessage = error }
             if let lists = packet.playlists {
                 self.playlists = lists
@@ -143,7 +151,10 @@ final class RemoteClient: ObservableObject {
         send(Packet(action: "library", offset: 0, playlistID: id))
     }
     func loadRoutes() { routeMessage = "正在寻找音频输出……"; send(Packet(action: "routes")) }
-    func selectRoute(_ id: String) { routeMessage = "正在切换……"; send(Packet(action: "route", routeID: id)) }
+    func selectRoute(_ id: String) {
+        guard connected, selectingRouteID == nil else { return }
+        selectingRouteID = id; routeMessage = "正在连接音频输出……"; send(Packet(action: "route", routeID: id))
+    }
     func loadArtwork(_ id: String) {
         guard connected, !requestedArtwork.contains(id) else { return }
         requestedArtwork.insert(id)
@@ -152,7 +163,7 @@ final class RemoteClient: ObservableObject {
     func playQueue(_ tracks: [RemoteTrack]) { send(Packet(action: "queue", tracks: tracks)) }
     func send(_ packet: Packet) {
         guard connected else { return }
-        if busy { if packet.action != "status" { deferred.append(packet) }; return }
+        if busy { deferred.append(packet); return }
         busy = true; pending = packet.id; pendingAction = packet.action
         let deadline = DispatchWorkItem { [weak self] in self?.wire?.close("Mac 未响应。请检查“音乐”应用与自动化权限，然后重新连接。") }
         timeout = deadline
@@ -165,6 +176,7 @@ final class RemoteClient: ObservableObject {
     func disconnect() {
         wantsConnection = false; connecting = false
         timer = nil; timeout?.cancel(); wire?.close(); wire = nil
-        connected = false; busy = false; pending = nil; deferred = []
+        selectingRouteID = nil; routes = []; routeMessage = ""
+        connected = false; busy = false; pending = nil; deferred = RequestQueue()
     }
 }

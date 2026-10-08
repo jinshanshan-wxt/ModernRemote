@@ -57,6 +57,7 @@ final class Companion: ObservableObject {
                 } else if request.action == "route", let id = request.routeID {
                     try self.music.selectAudioRoute(id)
                     reply.routes = try self.music.audioRoutes()
+                    reply.playback = try self.music.status()
                 } else if request.action == "playlists" {
                     reply.playlists = try self.music.playlists()
                 } else {

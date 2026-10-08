@@ -5,30 +5,28 @@ import Network
     @StateObject private var remote = RemoteClient()
     var body: some Scene {
         WindowGroup {
-            AdaptiveRemoteView().tint(.pink).environmentObject(remote)
+            AdaptiveRemoteView().tint(Color(red: 1, green: 0.15, blue: 0.25)).environmentObject(remote)
                 .environment(\.locale, Locale(identifier: "zh_Hans"))
+
         }
     }
 }
 
 struct AdaptiveRemoteView: View {
     @EnvironmentObject var remote: RemoteClient
+    @Environment(\.horizontalSizeClass) private var sizeClass
     @State private var selection = 0
     @State private var showPlayer = false
-    init() {
-        #if DEBUG
-        _showPlayer = State(initialValue: ProcessInfo.processInfo.arguments.contains("--show-player"))
-        #endif
-    }
     var body: some View {
         Group {
-            if #available(iOS 26.0, *) {
+            if sizeClass == .regular {
+                PadLibraryView(showPlayer: { showPlayer = true })
+            } else if #available(iOS 26.0, *) {
                 tabs.tabViewBottomAccessory { MiniPlayer { showPlayer = true } }
             } else {
                 tabs
             }
         }
-        .environment(\.horizontalSizeClass, .compact)
         .fullScreenCover(isPresented: $showPlayer) { PlayerView() }
         .task { remote.discover() }
     }
@@ -37,7 +35,7 @@ struct AdaptiveRemoteView: View {
             tab("Artists").tabItem { Label("艺人", systemImage: "person.fill") }.tag(0)
             tab("Albums").tabItem { Label("专辑", systemImage: "square.stack.fill") }.tag(1)
             tab("Songs").tabItem { Label("歌曲", systemImage: "music.note") }.tag(2)
-            tab("Genres").tabItem { Label("类型", systemImage: "guitars.fill") }.tag(3)
+            tab("Genres").tabItem { Label("类型", systemImage: "tag.fill") }.tag(3)
             NavigationStack { MoreView() }.modifier(LegacyPlayerInset(showPlayer: { showPlayer = true }))
                 .tabItem { Label("更多", systemImage: "ellipsis") }.tag(4)
         }
@@ -45,6 +43,92 @@ struct AdaptiveRemoteView: View {
     private func tab(_ category: String) -> some View {
         NavigationStack { LibraryView(category: category) }
             .modifier(LegacyPlayerInset(showPlayer: { showPlayer = true }))
+    }
+}
+struct PadLibraryView: View {
+    @EnvironmentObject var remote: RemoteClient
+    var showPlayer: () -> Void
+    @State private var category: String? = "Albums"
+    @State private var visibility: NavigationSplitViewVisibility = .all
+    private let sections: [(String, String, String)] = [
+        ("Recent", "最近添加", "clock"), ("Artists", "艺人", "person.fill"),
+        ("Albums", "专辑", "square.stack.fill"), ("Songs", "歌曲", "music.note"),
+        ("Genres", "类型", "tag.fill"), ("Playlists", "播放列表", "music.note.list")
+    ]
+    var body: some View {
+        NavigationSplitView(columnVisibility: $visibility) {
+            List(selection: $category) {
+                Section("资料库") {
+                    ForEach(sections, id: \.0) { item in
+                        Button { category = item.0 } label: {
+                            Label(item.1, systemImage: item.2)
+                                .foregroundStyle(category == item.0 ? Color(red: 1, green: 0.15, blue: 0.25) : .primary)
+                                .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                        }.buttonStyle(.plain).tag(item.0)
+                    }
+                }
+                Section {
+                    Button { category = "Settings" } label: {
+                        Label("设置", systemImage: "gearshape").frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                    }.buttonStyle(.plain).tag("Settings")
+                }
+            }.listStyle(.sidebar).navigationTitle("音乐")
+                .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 280)
+        } detail: {
+            NavigationStack {
+                detail
+            }.id(category)
+        }.navigationSplitViewStyle(.balanced).tint(Color(red: 1, green: 0.15, blue: 0.25))
+            .safeAreaInset(edge: .bottom, spacing: 0) { PadPlaybackBar(showPlayer: showPlayer) }
+    }
+    @ViewBuilder private var detail: some View {
+        if category == "Settings" { SettingsView() }
+        else { LibraryView(category: category ?? "Albums") }
+    }
+}
+struct PadPlaybackBar: View {
+    @EnvironmentObject var remote: RemoteClient
+    var showPlayer: () -> Void
+    @State private var showRoutes = false
+    @State private var showVolume = false
+    @State private var volume = 50.0
+    var body: some View {
+        HStack(spacing: 18) {
+            Button { remote.command("shuffle", value: remote.playback.shuffle == true ? 0 : 1) } label: {
+                Image(systemName: "shuffle").foregroundStyle(remote.playback.shuffle == true ? .primary : .secondary)
+            }.accessibilityLabel("随机播放")
+            Button { remote.command("previous") } label: { Image(systemName: "backward.fill") }.accessibilityLabel("上一首")
+            Button { remote.command(remote.playback.playing ? "pause" : "play") } label: {
+                Image(systemName: remote.playback.playing ? "pause.fill" : "play.fill").font(.system(size: 30))
+            }.accessibilityLabel(remote.playback.playing ? "暂停" : "播放")
+            Button { remote.command("next") } label: { Image(systemName: "forward.fill") }.accessibilityLabel("下一首")
+            Button { remote.command("repeat", value: Double(((remote.playback.repeatMode ?? 0) + 1) % 3)) } label: {
+                Image(systemName: remote.playback.repeatMode == 2 ? "repeat.1" : "repeat")
+                    .foregroundStyle((remote.playback.repeatMode ?? 0) > 0 ? .primary : .secondary)
+            }.accessibilityLabel("循环播放")
+            Button(action: showPlayer) {
+                HStack(spacing: 10) {
+                    MacArtwork(id: remote.playback.trackID, size: 44)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(remote.playback.title).font(.subheadline.weight(.medium)).lineLimit(1)
+                        Text(remote.playback.artist).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.contentShape(Rectangle())
+            }.accessibilityLabel("打开正在播放")
+            Button { showVolume = true } label: { Image(systemName: "speaker.wave.2").frame(width: 30, height: 40) }.accessibilityLabel("播放音量")
+                .popover(isPresented: $showVolume) {
+                    Slider(value: $volume, in: 0...100) { editing in if !editing { remote.command("volume", value: volume) } }
+                        .padding(24).frame(width: 240).onAppear { volume = remote.playback.volume }
+                }
+            Button { showRoutes = true } label: { Image(systemName: "airplay.audio").frame(width: 30, height: 40) }.accessibilityLabel("AirPlay 与音频输出")
+        }.font(.system(size: 19)).buttonStyle(.plain).foregroundStyle(.primary)
+            .padding(.horizontal, 22).padding(.vertical, 10).frame(maxWidth: 700)
+            .background(.regularMaterial, in: Capsule())
+            .overlay { Capsule().strokeBorder(.primary.opacity(0.08), lineWidth: 1) }
+            .disabled(!remote.connected)
+            .sheet(isPresented: $showRoutes) { AudioOutputView().presentationDetents([.medium, .large]) }
+            .padding(.horizontal, 20).padding(.bottom, 12).padding(.top, 8)
+            .frame(maxWidth: .infinity)
     }
 }
 struct LegacyPlayerInset: ViewModifier {
@@ -113,7 +197,7 @@ struct SettingsView: View {
             }
             Section("状态") { Text(remote.message).textSelection(.enabled) }
             Section("关于") {
-                LabeledContent("音乐遥控", value: "0.4.2")
+                LabeledContent("音乐遥控", value: "0.5.0")
                 Text("同一局域网免配对，可同时连接多台遥控设备。").font(.footnote)
             }
         }.navigationTitle("设置")
@@ -183,7 +267,7 @@ struct LibraryView: View {
     @State private var showDisplayOptions = false
     init(category: String) {
         self.category = category
-        let prefix = "browser.\(category)."
+        let prefix = "browser.\(category == "Recent" ? "RecentAlbums" : category)."
         _descending = AppStorage(wrappedValue: category == "Recent", prefix + "descending")
         _sortRaw = AppStorage(wrappedValue: category == "Recent" ? "added" : "title", prefix + "sort")
         _favoritesOnly = AppStorage(wrappedValue: false, prefix + "favorites")
@@ -192,7 +276,7 @@ struct LibraryView: View {
         _showAlbum = AppStorage(wrappedValue: true, prefix + "album")
         _showDuration = AppStorage(wrappedValue: false, prefix + "duration")
         _showRating = AppStorage(wrappedValue: false, prefix + "rating")
-        _gridLayout = AppStorage(wrappedValue: category == "Albums", prefix + "grid")
+        _gridLayout = AppStorage(wrappedValue: category == "Albums" || category == "Recent", prefix + "grid")
         _showPlaylistCount = AppStorage(wrappedValue: true, prefix + "playlistCount")
         _gridSize = AppStorage(wrappedValue: 170.0, prefix + "size")
     }
@@ -203,23 +287,27 @@ struct LibraryView: View {
     private var songs: [RemoteTrack] {
         remote.macTracks.filter { track in
             (search.isEmpty || "\(track.title) \(track.artist) \(track.album) \(track.genre)".localizedCaseInsensitiveContains(search)) &&
-            (!favoritesOnly || (category == "Albums" ? track.albumFavorite == true : category == "Artists" ? true : track.favorite == true))
+            (!favoritesOnly || ((category == "Albums" || category == "Recent") ? track.albumFavorite == true : category == "Artists" ? true : track.favorite == true))
         }.sorted { LibrarySorting.less([$0], [$1], order: order, descending: descending, context: "Songs") }
     }
     private var groups: [(String, [RemoteTrack])] {
-        Dictionary(grouping: songs) { t in
+        Dictionary(grouping: (category == "Albums" || category == "Recent") ? remote.macTracks : songs) { t in
             switch category {
             case "Artists": return t.artist.isEmpty ? "未知艺人" : t.artist
             case "Genres": return t.genre.isEmpty ? "未分类" : t.genre
             default: return albumKey(t)
             }
-        }.map { ($0.key, $0.value) }.sorted {
+        }.map { ($0.key, $0.value) }.filter { group in
+            guard category == "Albums" || category == "Recent" else { return true }
+            return (search.isEmpty || group.1.contains { "\($0.title) \($0.artist) \($0.album)".localizedCaseInsensitiveContains(search) }) &&
+                (!favoritesOnly || group.1.contains { $0.albumFavorite == true })
+        }.sorted {
             LibrarySorting.less($0.1, $1.1, order: order, descending: descending, context: category, leftTitle: $0.0, rightTitle: $1.0)
         }
     }
     var body: some View {
         Group {
-            if category == "Albums" && gridLayout {
+            if category == "Recent" || (category == "Albums" && gridLayout) {
                 ScrollView {
                     loading
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: gridSize, maximum: gridSize + 80), spacing: 18)], spacing: 24) {
@@ -233,8 +321,8 @@ struct LibraryView: View {
             } else {
                 List {
                     if remote.loadingLibrary || !remote.connected { loading.listRowSeparator(.hidden) }
-                    if category == "Songs" || category == "Recent" {
-                        ForEach(songs) { MacTrackRow(track: $0, showArtwork: showArtwork, showArtist: showArtist, showAlbum: showAlbum, showDuration: showDuration, showRating: showRating) }
+                    if category == "Songs" {
+                        ForEach(songs) { MacTrackRow(track: $0, showArtwork: category != "Songs" && showArtwork, showArtist: showArtist, showAlbum: showAlbum, showDuration: showDuration, showRating: showRating) }
                     } else if category == "Playlists" {
                         ForEach(remote.playlists.filter { (search.isEmpty || $0.name.localizedCaseInsensitiveContains(search)) && (!favoritesOnly || $0.favorite == true) }.sorted { descending ? $0.name > $1.name : $0.name < $1.name }) { list in
                             NavigationLink { MacPlaylistView(playlist: list) } label: {
@@ -275,7 +363,7 @@ struct LibraryView: View {
                     Menu {
                         if category != "Genres" {
                             Section {
-                                Button { favoritesOnly = false } label: { Label("所有" + (category == "Recent" ? "歌曲" : title), systemImage: favoritesOnly ? "" : "checkmark") }
+                                Button { favoritesOnly = false } label: { Label("所有" + (category == "Recent" ? "专辑" : title), systemImage: favoritesOnly ? "" : "checkmark") }
                                 Button { favoritesOnly = true } label: { Label("仅喜爱", systemImage: favoritesOnly ? "checkmark" : "") }.disabled(category == "Artists")
                             }
                         }
@@ -297,14 +385,15 @@ struct LibraryView: View {
                 NavigationStack {
                     Form {
                         if category == "Playlists" { Toggle("显示歌曲数量", isOn: $showPlaylistCount) }
+                        if category == "Recent" { Slider(value: $gridSize, in: 130...230, step: 10) { Text("封面大小") } }
                         if category == "Albums" {
                             Picker("显示方式", selection: $gridLayout) { Text("网格").tag(true); Text("列表").tag(false) }
                             if gridLayout { Slider(value: $gridSize, in: 130...230, step: 10) { Text("封面大小") } }
                         }
                         if category != "Playlists" {
-                            if category != "Albums" || !gridLayout { Toggle("显示封面", isOn: $showArtwork) }
+                            if category != "Songs" && category != "Recent" && (category != "Albums" || !gridLayout) { Toggle("显示封面", isOn: $showArtwork) }
                             if category == "Albums" || category == "Songs" || category == "Recent" { Toggle("显示艺人", isOn: $showArtist) }
-                            if category == "Songs" || category == "Recent" {
+                            if category == "Songs" {
                                 Toggle("显示专辑", isOn: $showAlbum)
                                 Toggle("显示时长", isOn: $showDuration)
                                 Toggle("显示评分", isOn: $showRating)
@@ -356,22 +445,63 @@ struct ArtistAlbumsView: View {
 }
 struct TrackCollectionView: View {
     @EnvironmentObject var remote: RemoteClient
+    @Environment(\.horizontalSizeClass) private var sizeClass
     let title: String
     let tracks: [RemoteTrack]
-    private var sorted: [RemoteTrack] { tracks.sorted { $0.album == $1.album ? $0.trackNumber < $1.trackNumber : $0.album < $1.album } }
+    var isPlaylist = false
+    var loading = false
+    private var sorted: [RemoteTrack] {
+        if isPlaylist { return tracks }
+        return tracks.sorted {
+            if $0.album != $1.album { return $0.album < $1.album }
+            if $0.discNumber != $1.discNumber { return ($0.discNumber ?? 1) < ($1.discNumber ?? 1) }
+            return $0.trackNumber < $1.trackNumber
+        }
+    }
     var body: some View {
         List {
             Section {
-                HStack { Spacer(); MacArtwork(id: tracks.first?.id, size: 200); Spacer() }.listRowSeparator(.hidden)
-                Button { remote.playQueue(sorted) } label: { Label("按顺序播放", systemImage: "play.fill").frame(maxWidth: .infinity) }
-                    .buttonStyle(.borderedProminent).disabled(!remote.connected || sorted.isEmpty)
-            } footer: { Text("将在 Mac 新建遥控播放列表，连续播放这些歌曲。") }
-            ForEach(sorted) { MacTrackRow(track: $0) }
-        }.listStyle(.plain).navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+                Group {
+                    if sizeClass == .regular {
+                        HStack(alignment: .bottom, spacing: 30) {
+                            MacArtwork(id: tracks.first?.id, size: 240)
+                            information
+                            Spacer(minLength: 0)
+                        }.padding(.vertical, 20)
+                    } else {
+                        VStack(alignment: .leading, spacing: 24) {
+                            HStack { Spacer(); MacArtwork(id: tracks.first?.id, size: 240); Spacer() }
+                            information
+                        }.padding(.vertical, 12)
+                    }
+                }.listRowSeparator(.hidden)
+            }
+            if loading { ProgressView("正在读取播放列表……") }
+            ForEach(sorted) { track in
+                MacTrackRow(track: track, showArtwork: isPlaylist, showArtist: isPlaylist, showAlbum: false, showDuration: true)
+                    .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+            }
+            Text("\(tracks.count) 首歌曲 · \(Int(tracks.reduce(0) { $0 + $1.duration }) / 60) 分钟")
+                .font(.footnote).foregroundStyle(.secondary).listRowSeparator(.hidden)
+        }.listStyle(.plain).contentMargins(.horizontal, sizeClass == .regular ? 28 : 16)
+            .navigationBarTitleDisplayMode(.inline)
+    }
+    private var information: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(isPlaylist ? title : (tracks.first?.album.isEmpty == false ? tracks.first!.album : title)).font(.largeTitle.bold())
+            Text(isPlaylist ? "播放列表" : (tracks.first.map { $0.albumArtist.isEmpty ? $0.artist : $0.albumArtist } ?? "")).font(.title2).foregroundStyle(.secondary)
+            if !isPlaylist, let first = tracks.first {
+                Text([first.genre, (first.year ?? 0) > 0 ? String(first.year!) : ""].filter { !$0.isEmpty }.joined(separator: " · "))
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+            Button { remote.playQueue(sorted) } label: { HStack(spacing: 8) { Image(systemName: "play.fill"); Text("播放") }.foregroundStyle(Color(uiColor: .systemBackground)).frame(width: 140, height: 28) }
+                .buttonStyle(.borderedProminent).tint(Color.primary).foregroundStyle(Color(uiColor: .systemBackground)).disabled(!remote.connected || sorted.isEmpty || loading).padding(.top, 8)
+        }
     }
 }
 struct MacTrackRow: View {
     @EnvironmentObject var remote: RemoteClient
+    @Environment(\.horizontalSizeClass) private var sizeClass
     let track: RemoteTrack
     var showArtwork = true
     var showArtist = true
@@ -384,10 +514,12 @@ struct MacTrackRow: View {
                 if showArtwork { MacArtwork(id: track.id, size: 48) }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(track.title).foregroundStyle(.primary).lineLimit(1)
-                    if showArtist || showAlbum { Text([showArtist ? track.artist : "", showAlbum ? track.album : ""].filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                    if sizeClass != .regular, showArtist || showAlbum { Text([showArtist ? track.artist : "", showAlbum ? track.album : ""].filter { !$0.isEmpty }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
                     if showRating, let rating = track.rating { Text(rating == 0 ? "未评分" : String(repeating: "★", count: max(0, min(5, rating / 20)))).font(.caption).foregroundStyle(.secondary) }
                 }
+                .frame(maxWidth: sizeClass == .regular ? .infinity : nil, alignment: .leading)
                 Spacer(minLength: 4)
+                if sizeClass == .regular, showArtist { Text(track.artist).foregroundStyle(.secondary).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading) }
                 if showDuration { Text(String(format: "%d:%02d", Int(track.duration) / 60, Int(track.duration) % 60)).font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
                 if remote.playback.trackID == track.id { Image(systemName: "waveform").foregroundStyle(.pink) }
             }.padding(.vertical, 3).contentShape(Rectangle())
@@ -398,14 +530,8 @@ struct MacPlaylistView: View {
     @EnvironmentObject var remote: RemoteClient
     let playlist: RemotePlaylist
     var body: some View {
-        List {
-            Section {
-                Button { remote.playQueue(remote.playlistTracks[playlist.id] ?? []) } label: { Label("按顺序播放", systemImage: "play.fill") }
-                    .disabled(!remote.completedPlaylists.contains(playlist.id) || (remote.playlistTracks[playlist.id] ?? []).isEmpty)
-            } footer: { Text("将在 Mac 新建遥控播放列表，按原列表顺序连续播放。") }
-            if !remote.completedPlaylists.contains(playlist.id) { ProgressView("正在读取播放列表 · \(remote.playlistTracks[playlist.id]?.count ?? 0) 首") }
-            ForEach(Array((remote.playlistTracks[playlist.id] ?? []).enumerated()), id: \.offset) { item in MacTrackRow(track: item.element) }
-        }.listStyle(.plain).navigationTitle(playlist.name).task { remote.loadPlaylist(playlist.id) }
+        TrackCollectionView(title: playlist.name, tracks: remote.playlistTracks[playlist.id] ?? [], isPlaylist: true, loading: !remote.completedPlaylists.contains(playlist.id))
+            .task { remote.loadPlaylist(playlist.id) }
     }
 }
 struct PlayerView: View {
@@ -563,9 +689,10 @@ struct AudioOutputView: View {
                     else if route.requiresPassword { Text("首次连接可能需要在 Mac 验证").font(.caption).foregroundStyle(.secondary) }
                 }
                 Spacer()
-                if route.selected { Image(systemName: "checkmark.circle.fill") }
-            }.padding(.vertical, 8)
-        }.disabled(!route.available || !remote.connected).buttonStyle(.plain)
+                if remote.selectingRouteID == route.id { ProgressView() }
+                else if route.selected { Image(systemName: "checkmark.circle.fill") }
+            }.padding(.vertical, 8).frame(maxWidth: .infinity).contentShape(Rectangle())
+        }.disabled(!route.available || !remote.connected || remote.selectingRouteID != nil).buttonStyle(.plain)
     }
 }
 struct MacArtwork: View {
