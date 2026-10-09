@@ -18,6 +18,7 @@ final class RemoteClient: ObservableObject {
     @Published var selectingRouteID: String? = nil
     private var incomingArtwork: [String: ArtworkAssembly] = [:]
     private var activePlaybackIDs: [String] = []
+    private var latestSelectionID: String?
     private var pendingEmptyPlayback: DispatchWorkItem?
     private var requestedArtwork: Set<String> = []
     @Published var playlists: [RemotePlaylist] = []
@@ -147,6 +148,7 @@ final class RemoteClient: ObservableObject {
         peer.onPacket = { [weak self] packet in
             guard let self, packet.id == self.pending else { return }
             let requestAction = self.pendingAction
+            if packet.id == self.latestSelectionID { self.latestSelectionID = nil }
             self.timeout?.cancel(); self.pending = nil; self.pendingAction = nil; self.busy = false
             if let error = packet.error { self.message = error }
             if requestAction == "cacheInfo" {
@@ -308,16 +310,23 @@ final class RemoteClient: ObservableObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + (packet.action == "queue" ? 120 : 30), execute: deadline)
         wire?.send(packet)
     }
-    func command(_ action: String, value: Double? = nil) { send(Packet(action: action, value: value)) }
+    func command(_ action: String, value: Double? = nil) {
+        var request = Packet(action: action, value: value)
+        request.playbackContextID = latestSelectionID ?? playback.contextID
+        send(request)
+    }
     func play(_ track: RemoteTrack, in context: [RemoteTrack]? = nil, shuffle: Bool = false) {
         guard let selection = PlaybackSelection(tracks: context ?? macTracks, selectedID: track.id) else {
             message = "这首歌曲不在当前播放列表中，请刷新资料库。"; return
         }
         activePlaybackIDs = selection.ids
-        send(Packet(action: "queue", value: shuffle ? 1 : 0, offset: selection.start, trackIDs: selection.ids))
+        let request = Packet(action: "queue", value: shuffle ? 1 : 0, offset: selection.start, trackIDs: selection.ids)
+        latestSelectionID = request.id
+        send(request)
     }
     func loadMacPage() { send(Packet(action: "library", offset: incomingTracks.count)) }
     func disconnect() {
+        latestSelectionID = nil
         incomingArtwork = [:]; pendingEmptyPlayback?.cancel(); pendingEmptyPlayback = nil; cacheEpoch += 1; requestedArtwork = []
         wantsConnection = false; connecting = false
         timer = nil; timeout?.cancel(); wire?.close(); wire = nil

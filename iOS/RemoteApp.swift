@@ -110,20 +110,22 @@ struct PadLibraryView: View {
     ]
     var body: some View {
         NavigationSplitView(columnVisibility: $visibility) {
-            List(selection: $category) {
+            List {
                 Section("资料库") {
                     ForEach(sections, id: \.0) { item in
                         Button { category = item.0 } label: {
                             Label(item.1, systemImage: item.2)
                                 .foregroundStyle(category == item.0 ? Color.accentColor : .primary)
                                 .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                        }.buttonStyle(.plain).tag(item.0)
+                        }.buttonStyle(.plain)
+                            .listRowBackground(RoundedRectangle(cornerRadius: 12).fill(category == item.0 ? Color.primary.opacity(0.10) : Color.clear))
                     }
                 }
                 Section {
                     Button { category = "Settings" } label: {
                         Label("设置", systemImage: "gearshape").frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                    }.buttonStyle(.plain).tag("Settings")
+                    }.buttonStyle(.plain)
+                        .listRowBackground(RoundedRectangle(cornerRadius: 12).fill(category == "Settings" ? Color.primary.opacity(0.10) : Color.clear))
                 }
             }.listStyle(.sidebar).navigationTitle("音乐")
                 .navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 280)

@@ -10,6 +10,7 @@ final class Companion: ObservableObject {
     private var listener: NWListener?
     private var peers: [UUID: Wire] = [:]
     private let music = MusicBridge()
+    private var requests = SerialRequestGate<(Packet, Wire, UUID)>()
     init() {
         DispatchQueue.main.async { [weak self] in self?.start() }
     }
@@ -50,6 +51,19 @@ final class Companion: ObservableObject {
         }
         peer.onPacket = { [weak self, weak peer] request in
             guard let self, let peer else { return }
+            self.requests.append((request, peer, id))
+            self.drainRequests()
+        }
+        peer.start()
+    }
+    private func drainRequests() {
+        while let (request, peer, controller) = requests.next() {
+            // A disconnected controller must never replay a delayed intent.
+            if peers[controller] === peer { process(request, peer: peer, controller: controller) }
+            requests.finish()
+        }
+    }
+    private func process(_ request: Packet, peer: Wire, controller: UUID) {
             var reply = Packet(id: request.id, action: "reply")
             do {
                 if request.action == "cacheInfo" {
@@ -87,14 +101,15 @@ final class Companion: ObservableObject {
                 } else if request.action == "playlists" {
                     reply.playlists = try self.music.playlists()
                 } else {
-                    if request.action != "status" { try self.music.execute(request) }
+                    if request.action != "status" {
+                        self.music.traceCommand(request, controller: controller.uuidString)
+                        try self.music.execute(request)
+                    }
                     self.playback = try self.music.status()
                     reply.playback = self.playback
                 }
             } catch { reply.error = error.localizedDescription; self.message = error.localizedDescription }
             peer.send(reply)
-        }
-        peer.start()
     }
     func stop() {
         let active = Array(peers.values); peers.removeAll()

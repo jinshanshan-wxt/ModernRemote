@@ -10,6 +10,9 @@ final class MusicBridge {
     private var playbackIDs: [String] = []
     private var playbackPlaylistID: String?
     private var playbackStart = 0
+    private var playbackIntentID: String?
+    private let diagnostics = PlaybackDiagnostics()
+    private var lastPlaybackTrace = ""
     private var airDeviceIDs: [String: String] = [:]
     private var localTrackIDs: Set<String>?
     private var artworkCache: [String: Data] = [:]
@@ -101,10 +104,27 @@ final class MusicBridge {
         let result = try run("""
         set v to sound volume
         set s to player state as string
+        set sourceID to missing value
+        try
+            set sourceID to persistent ID of current playlist
+        end try
         if s is "stopped" then return {"尚未播放", "", s, 0, 0, v, missing value, shuffle enabled, song repeat as string}
-        return {name of current track, artist of current track, s, player position, duration of current track, v, persistent ID of current track, shuffle enabled, song repeat as string}
+        try
+            return {name of current track, artist of current track, s, player position, duration of current track, v, persistent ID of current track, shuffle enabled, song repeat as string, sourceID}
+        on error
+            return {"尚未播放", "", "stopped", 0, 0, v, missing value, shuffle enabled, song repeat as string, missing value}
+        end try
         """)
-        return Playback(trackID: result.atIndex(7)?.stringValue, title: result.atIndex(1)?.stringValue ?? "", artist: result.atIndex(2)?.stringValue ?? "",
+        let nativePlaylist = result.atIndex(10)?.stringValue
+        let contextID = nativePlaylist == playbackPlaylistID ? playbackIntentID : nil
+        let trace = "\(result.atIndex(7)?.stringValue ?? ""):\(nativePlaylist ?? ""):\(result.atIndex(3)?.stringValue ?? "")"
+        if trace != lastPlaybackTrace {
+            lastPlaybackTrace = trace
+            diagnostics.append(PlaybackTrace(event: "state", context: contextID, nativePlaylist: nativePlaylist,
+                expectedPlaylist: playbackPlaylistID, track: result.atIndex(7)?.stringValue,
+                position: number(result.atIndex(4)), state: result.atIndex(3)?.stringValue))
+        }
+        return Playback(contextID: contextID, trackID: result.atIndex(7)?.stringValue, title: result.atIndex(1)?.stringValue ?? "", artist: result.atIndex(2)?.stringValue ?? "",
                         playing: result.atIndex(3)?.stringValue == "playing",
                         position: number(result.atIndex(4)), duration: number(result.atIndex(5)), volume: number(result.atIndex(6)),
                         shuffle: result.atIndex(8)?.booleanValue, repeatMode: result.atIndex(9)?.stringValue == "all" ? 1 : result.atIndex(9)?.stringValue == "one" ? 2 : 0)
@@ -219,6 +239,7 @@ final class MusicBridge {
                 play p once false
                 set shuffle enabled to \(shuffle ? "true" : "false")
                 """)
+                try verifyPlaybackPlaylist(playlistID, firstID: shuffle ? nil : ids[start])
                 return
             } catch { playbackIDs = []; playbackPlaylistID = nil }
         }
@@ -244,7 +265,30 @@ final class MusicBridge {
         set shuffle enabled to \(shuffle ? "true" : "false")
         return persistent ID of p
         """)
-        playbackIDs = ids; playbackStart = start; playbackPlaylistID = result.stringValue
+        guard let playlistID = result.stringValue else { throw failure("无法确认新播放列表。") }
+        playbackIDs = []; playbackPlaylistID = nil
+        try verifyPlaybackPlaylist(playlistID, firstID: shuffle ? nil : ids[start])
+        playbackIDs = ids; playbackStart = start; playbackPlaylistID = playlistID
+    }
+    private func verifyPlaybackPlaylist(_ playlistID: String, firstID: String?) throws {
+        let expectedTrack = firstID.map { " and (persistent ID of current track is \(Self.quote($0)))" } ?? ""
+        _ = try run("""
+        set acceptedReports to 0
+        repeat 30 times
+            try
+                if (player state is playing) and (persistent ID of current playlist is \(Self.quote(playlistID)))\(expectedTrack) then
+                    set acceptedReports to acceptedReports + 1
+                    if acceptedReports >= 3 then return true
+                else
+                    set acceptedReports to 0
+                end if
+            on error
+                set acceptedReports to 0
+            end try
+            delay 0.1
+        end repeat
+        error "音乐应用未接受新播放队列，请重新选择专辑。"
+        """)
     }
     func audioRoutes() throws -> [AudioRoute] {
         let result = try run("""
@@ -305,7 +349,23 @@ final class MusicBridge {
             """)
         }
     }
+    private func advanceNative(_ command: String) throws {
+        _ = try run("""
+        set wasPlaying to player state is playing
+        \(command)
+        delay 0.2
+        if wasPlaying and player state is paused then play
+        """)
+    }
+    func traceCommand(_ packet: Packet, controller: String) {
+        diagnostics.append(PlaybackTrace(event: "command", controller: controller, request: packet.id,
+            action: packet.action, context: packet.playbackContextID, track: packet.track?.id,
+            offset: packet.offset, count: packet.trackIDs?.count))
+    }
     func execute(_ packet: Packet) throws {
+        if let expected = packet.playbackContextID, ["next", "previous", "play", "pause", "seek"].contains(packet.action) {
+            guard try status().contextID == expected else { throw failure("播放队列已改变，旧控制已取消，请刷新播放状态后重试。") }
+        }
         switch packet.action {
         case "shuffle":
             guard packet.value == 0 || packet.value == 1 else { throw failure("随机播放设置无效。") }
@@ -313,17 +373,21 @@ final class MusicBridge {
         case "repeat":
             guard let value = packet.value, [0.0, 1.0, 2.0].contains(value) else { throw failure("循环播放设置无效。") }
             _ = try run("set song repeat to " + (value == 0 ? "off" : value == 1 ? "all" : "one"))
-        case "queue": try playQueue(packet.trackIDs ?? (packet.tracks ?? []).map(\.id), start: packet.offset ?? 0, shuffle: packet.value == 1)
+        case "queue":
+            playbackIntentID = nil
+            try playQueue(packet.trackIDs ?? (packet.tracks ?? []).map(\.id), start: packet.offset ?? 0, shuffle: packet.value == 1)
+            playbackIntentID = packet.id
         case "play": _ = try run("play")
         case "pause": _ = try run("pause")
         case "stop": _ = try run("stop")
         case "previous":
             let current = try status()
-            if current.shuffle != true, current.position < 3, playbackStart > 0,
+            if current.contextID != nil, current.shuffle != true, current.position < 3, playbackStart > 0,
                playbackIDs.indices.contains(playbackStart), current.trackID == playbackIDs[playbackStart] {
                 try playQueue(playbackIDs, start: playbackStart - 1, shuffle: false)
-            } else { _ = try run("previous track") }
-        case "next": _ = try run("next track")
+                if !current.playing { _ = try run("pause") }
+            } else { try advanceNative("previous track") }
+        case "next": try advanceNative("next track")
         case "seek":
             guard let value = packet.value, value.isFinite, value >= 0 else { throw failure("播放进度无效。") }
             let current = try status()
@@ -401,5 +465,39 @@ enum CoreAudioOutputs {
         var a = address(kAudioHardwarePropertyDefaultOutputDevice); var value = id
         let status = AudioObjectSetPropertyData(AudioObjectID(kAudioObjectSystemObject), &a, 0, nil, UInt32(MemoryLayout<AudioDeviceID>.size), &value)
         guard status == noErr else { throw NSError(domain: "CoreAudio", code: Int(status), userInfo: [NSLocalizedDescriptionKey: "无法切换 Mac 音频输出（\(status)）。"]) }
+    }
+}
+
+// Bounded local diagnostics use identifiers only, without titles, account data
+// or network addresses. Disk writes never run on the Music automation thread.
+private struct PlaybackTrace: Codable {
+    var timestamp = Date().timeIntervalSince1970
+    var event: String
+    var controller: String? = nil
+    var request: String? = nil
+    var action: String? = nil
+    var context: String? = nil
+    var nativePlaylist: String? = nil
+    var expectedPlaylist: String? = nil
+    var track: String? = nil
+    var position: Double? = nil
+    var state: String? = nil
+    var offset: Int? = nil
+    var count: Int? = nil
+}
+private final class PlaybackDiagnostics {
+    private let queue = DispatchQueue(label: "ModernRemote.playback-diagnostics", qos: .utility)
+    private let file = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("ModernRemote/PlaybackDiagnostics-v1.json")
+    private var entries: [PlaybackTrace]?
+    func append(_ entry: PlaybackTrace) {
+        queue.async { [self] in
+            if entries == nil { entries = (try? Data(contentsOf: file)).flatMap { try? JSONDecoder().decode([PlaybackTrace].self, from: $0) } ?? [] }
+            entries!.append(entry)
+            if entries!.count > 200 { entries!.removeFirst(entries!.count - 200) }
+            guard let data = try? JSONEncoder().encode(entries) else { return }
+            try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? data.write(to: file, options: .atomic)
+        }
     }
 }

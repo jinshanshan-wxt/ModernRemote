@@ -37,6 +37,7 @@ struct AudioRoute: Codable, Identifiable, Equatable {
     var isSystem: Bool { id.hasPrefix("core:") }
 }
 struct Playback: Codable {
+    var contextID: String? = nil
     var trackID: String? = nil
     var title = "尚未播放"
     var artist = ""
@@ -54,6 +55,7 @@ struct Packet: Codable {
     var version = 1
     var id = UUID().uuidString
     var action: String
+    var playbackContextID: String? = nil
     var track: RemoteTrack? = nil
     var value: Double? = nil
     var offset: Int? = nil
@@ -169,6 +171,11 @@ struct RequestQueue {
     private var packets: [Packet] = []
     var isEmpty: Bool { packets.isEmpty }
     mutating func append(_ packet: Packet) {
+        if packet.action == "queue" || packet.action == "track" {
+            // A new selection replaces unsent intents for the old selection.
+            let obsolete = Set(["queue", "track", "next", "previous", "play", "pause", "seek"])
+            packets.removeAll { obsolete.contains($0.action) }
+        }
         if packet.action == "status", packets.contains(where: { $0.action == "status" }) { return }
         packets.append(packet)
     }
@@ -245,4 +252,18 @@ struct ArtworkAssembly {
         data.append(bytes)
         return hasMore ? nil : data
     }
+}
+
+// Main-thread Apple Events can pump the run loop while waiting. Main-thread
+// delivery alone therefore does not guarantee non-overlapping transactions.
+struct SerialRequestGate<Element> {
+    private var waiting: [Element] = []
+    private var processing = false
+    mutating func append(_ element: Element) { waiting.append(element) }
+    mutating func next() -> Element? {
+        guard !processing, !waiting.isEmpty else { return nil }
+        processing = true
+        return waiting.removeFirst()
+    }
+    mutating func finish() { processing = false }
 }
