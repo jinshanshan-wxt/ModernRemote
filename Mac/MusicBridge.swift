@@ -11,6 +11,7 @@ final class MusicBridge {
     private var playbackPlaylistID: String?
     private var playbackStart = 0
     private var playbackIntentID: String?
+    private(set) var queueCleanupWarning: String?
     private let diagnostics = PlaybackDiagnostics()
     private var lastPlaybackTrace = ""
     private var airDeviceIDs: [String: String] = [:]
@@ -254,8 +255,12 @@ final class MusicBridge {
             guard let index = positions[id] else { throw failure("曲库中的歌曲已变更，请刷新资料库。") }
             return index
         }.map(String.init).joined(separator: ",")
+        let queueKey = "playback.managedQueue." + LibraryDiskCache.key(try cacheInfo().serverID)
+        let previousQueue = UserDefaults.standard.string(forKey: queueKey)
+        let cleanupKey = queueKey + ".pendingCleanup"
         let result = try run("""
-        set p to make new user playlist with properties {name:"音乐遥控 · " & (current date as string)}
+        set p to make new user playlist with properties {name:"音乐遥控 · 当前播放"}
+        try
         repeat with trackIndex in {\(indices)}
             duplicate (track (trackIndex as integer) of library playlist 1) to p
         end repeat
@@ -264,11 +269,54 @@ final class MusicBridge {
         play p once false
         set shuffle enabled to \(shuffle ? "true" : "false")
         return persistent ID of p
+        on error queueErrorMessage number queueErrorNumber
+            try
+                delete p
+            end try
+            error queueErrorMessage number queueErrorNumber
+        end try
         """)
         guard let playlistID = result.stringValue else { throw failure("无法确认新播放列表。") }
         playbackIDs = []; playbackPlaylistID = nil
-        try verifyPlaybackPlaylist(playlistID, firstID: shuffle ? nil : ids[start])
+        var pendingCleanup = Set(UserDefaults.standard.stringArray(forKey: cleanupKey) ?? [])
+        pendingCleanup.insert(playlistID)
+        UserDefaults.standard.set(Array(pendingCleanup), forKey: cleanupKey)
+        do { try verifyPlaybackPlaylist(playlistID, firstID: shuffle ? nil : ids[start]) }
+        catch {
+            if (try? removeManagedPlaylist(playlistID)) != nil {
+                pendingCleanup.remove(playlistID)
+                UserDefaults.standard.set(Array(pendingCleanup), forKey: cleanupKey)
+            }
+            throw error
+        }
+        UserDefaults.standard.set(playlistID, forKey: queueKey)
+        var cleanup = Set(UserDefaults.standard.stringArray(forKey: cleanupKey) ?? [])
+        if let previousQueue, previousQueue != playlistID { cleanup.insert(previousQueue) }
+        cleanup.remove(playlistID)
+        UserDefaults.standard.set(Array(cleanup), forKey: cleanupKey)
+        queueCleanupWarning = nil
+        for old in cleanup {
+            do { try removeManagedPlaylist(old); cleanup.remove(old) }
+            catch {
+                if (error as NSError).code == -1728 { cleanup.remove(old) }
+                else { queueCleanupWarning = "旧内部播放列表未能清理，下次选歌时将重试。" }
+            }
+        }
+        UserDefaults.standard.set(Array(cleanup), forKey: cleanupKey)
+        // Never delete track objects: removing a playlist only removes its container.
+        // Persist ownership across companion restarts; one settled queue remains.
         playbackIDs = ids; playbackStart = start; playbackPlaylistID = playlistID
+    }
+    private func removeManagedPlaylist(_ id: String) throws {
+        guard id.count == 16, id.allSatisfy({ $0.isHexDigit }) else { return }
+        let name = try run("get name of first user playlist whose persistent ID is \(Self.quote(id))").stringValue
+        guard name == "音乐遥控 · 当前播放" else { return }
+        _ = try run("delete (first user playlist whose persistent ID is \(Self.quote(id)))")
+        cachedPlaylists?.removeAll { $0.id == id }
+        cachedPlaylistTracks[id] = nil
+        snapshot?.playlists.removeAll { $0.id == id }
+        snapshot?.playlistTracks[id] = nil
+        saveSnapshot()
     }
     private func verifyPlaybackPlaylist(_ playlistID: String, firstID: String?) throws {
         let expectedTrack = firstID.map { " and (persistent ID of current track is \(Self.quote($0)))" } ?? ""

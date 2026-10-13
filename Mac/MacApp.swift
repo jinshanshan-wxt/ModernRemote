@@ -104,6 +104,7 @@ final class Companion: ObservableObject {
                     if request.action != "status" {
                         self.music.traceCommand(request, controller: controller.uuidString)
                         try self.music.execute(request)
+                        if let warning = self.music.queueCleanupWarning { self.message = warning }
                     }
                     self.playback = try self.music.status()
                     reply.playback = self.playback
