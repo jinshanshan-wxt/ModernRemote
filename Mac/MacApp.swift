@@ -10,9 +10,22 @@ final class Companion: ObservableObject {
     private var listener: NWListener?
     private var peers: [UUID: Wire] = [:]
     private let music = MusicBridge()
-    private var requests = SerialRequestGate<(Packet, Wire, UUID)>()
+    private var requests = SerialRequestGate<() -> Void>()
+    private var monitor: Timer?
+    private var tickQueued = false
     init() {
         DispatchQueue.main.async { [weak self] in self?.start() }
+        monitor = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self, self.music.hasQueue, !self.tickQueued else { return }
+            self.tickQueued = true
+            self.requests.append { [weak self] in
+                guard let self else { return }
+                defer { self.tickQueued = false }
+                do { try self.music.tick() } catch { self.message = error.localizedDescription }
+            }
+            self.drainRequests()
+        }
+        RunLoop.main.add(monitor!, forMode: .common)
     }
     func start() {
         guard listener == nil else { return }
@@ -51,15 +64,17 @@ final class Companion: ObservableObject {
         }
         peer.onPacket = { [weak self, weak peer] request in
             guard let self, let peer else { return }
-            self.requests.append((request, peer, id))
+            self.requests.append { [weak self, weak peer] in
+                guard let self, let peer, self.peers[id] === peer else { return }
+                self.process(request, peer: peer, controller: id)
+            }
             self.drainRequests()
         }
         peer.start()
     }
     private func drainRequests() {
-        while let (request, peer, controller) = requests.next() {
-            // A disconnected controller must never replay a delayed intent.
-            if peers[controller] === peer { process(request, peer: peer, controller: controller) }
+        while let operation = requests.next() {
+            operation()
             requests.finish()
         }
     }
@@ -104,7 +119,6 @@ final class Companion: ObservableObject {
                     if request.action != "status" {
                         self.music.traceCommand(request, controller: controller.uuidString)
                         try self.music.execute(request)
-                        if let warning = self.music.queueCleanupWarning { self.message = warning }
                     }
                     self.playback = try self.music.status()
                     reply.playback = self.playback

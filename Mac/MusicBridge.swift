@@ -7,11 +7,12 @@ import ImageIO
 // NSAppleScript is executed serially on the main thread. Scripts consist only
 // of fixed commands plus escaped strings / validated numeric values.
 final class MusicBridge {
-    private var playbackIDs: [String] = []
-    private var playbackPlaylistID: String?
-    private var playbackStart = 0
+    private var memoryQueue: MemoryPlaybackQueue?
     private var playbackIntentID: String?
-    private(set) var queueCleanupWarning: String?
+    private var lastQueueSample: Playback?
+    private var pausedQueuePlayback: Playback?
+    private var lastQueueSampleAt = Date()
+    var hasQueue: Bool { memoryQueue != nil }
     private let diagnostics = PlaybackDiagnostics()
     private var lastPlaybackTrace = ""
     private var airDeviceIDs: [String: String] = [:]
@@ -101,7 +102,7 @@ final class MusicBridge {
         }
         return result
     }
-    func status() throws -> Playback {
+    private func nativeStatus() throws -> Playback {
         let result = try run("""
         set v to sound volume
         set s to player state as string
@@ -117,18 +118,18 @@ final class MusicBridge {
         end try
         """)
         let nativePlaylist = result.atIndex(10)?.stringValue
-        let contextID = nativePlaylist == playbackPlaylistID ? playbackIntentID : nil
+        let contextID = result.atIndex(7)?.stringValue == memoryQueue?.current ? playbackIntentID : nil
         let trace = "\(result.atIndex(7)?.stringValue ?? ""):\(nativePlaylist ?? ""):\(result.atIndex(3)?.stringValue ?? "")"
         if trace != lastPlaybackTrace {
             lastPlaybackTrace = trace
             diagnostics.append(PlaybackTrace(event: "state", context: contextID, nativePlaylist: nativePlaylist,
-                expectedPlaylist: playbackPlaylistID, track: result.atIndex(7)?.stringValue,
+                expectedPlaylist: nil, track: result.atIndex(7)?.stringValue,
                 position: number(result.atIndex(4)), state: result.atIndex(3)?.stringValue))
         }
         return Playback(contextID: contextID, trackID: result.atIndex(7)?.stringValue, title: result.atIndex(1)?.stringValue ?? "", artist: result.atIndex(2)?.stringValue ?? "",
                         playing: result.atIndex(3)?.stringValue == "playing",
                         position: number(result.atIndex(4)), duration: number(result.atIndex(5)), volume: number(result.atIndex(6)),
-                        shuffle: result.atIndex(8)?.booleanValue, repeatMode: result.atIndex(9)?.stringValue == "all" ? 1 : result.atIndex(9)?.stringValue == "one" ? 2 : 0)
+                        shuffle: memoryQueue?.shuffle ?? result.atIndex(8)?.booleanValue, repeatMode: memoryQueue?.repeatMode ?? (result.atIndex(9)?.stringValue == "all" ? 1 : result.atIndex(9)?.stringValue == "one" ? 2 : 0))
     }
     private func number(_ item: NSAppleEventDescriptor?) -> Double {
         guard let item else { return 0 }
@@ -223,120 +224,70 @@ final class MusicBridge {
         }
     }
     private func playQueue(_ ids: [String], start: Int, shuffle: Bool) throws {
-        guard !ids.isEmpty, ids.count <= 10000,
-              ids.indices.contains(start),
+        guard !ids.isEmpty, ids.count <= 10000, ids.indices.contains(start),
               ids.allSatisfy({ $0.count == 16 && $0.allSatisfy({ $0.isHexDigit }) }) else {
             throw failure("播放顺序或起始曲目无效，当前最多支持 10000 首。")
         }
-        // Music's play(track) still behaves like a single-item queue, even with
-        // a playlist reference and once=false. Play the playlist itself, with
-        // the selected track first and the remaining screen order after it.
-        if ids == playbackIDs, start == playbackStart, let playlistID = playbackPlaylistID {
-            do {
-                _ = try run("""
-                set p to first user playlist whose persistent ID is \(Self.quote(playlistID))
-                set shuffle enabled to \(shuffle ? "true" : "false")
-                set song repeat to off
-                play p once false
-                set shuffle enabled to \(shuffle ? "true" : "false")
-                """)
-                try verifyPlaybackPlaylist(playlistID, firstID: shuffle ? nil : ids[start])
-                return
-            } catch { playbackIDs = []; playbackPlaylistID = nil }
-        }
-        // Bulk-read identifiers once and use direct track indices. Avoid one
-        // full-library 'whose persistent ID' search for each queue insertion.
-        let libraryIDs = try run("get persistent ID of every track of library playlist 1")
-        var positions: [String: Int] = [:]
-        for index in 1...max(1, libraryIDs.numberOfItems) {
-            if let id = libraryIDs.atIndex(index)?.stringValue { positions[id] = index }
-        }
-        let indices = try ids.dropFirst(start).map { id -> Int in
-            guard let index = positions[id] else { throw failure("曲库中的歌曲已变更，请刷新资料库。") }
-            return index
-        }.map(String.init).joined(separator: ",")
-        let queueKey = "playback.managedQueue." + LibraryDiskCache.key(try cacheInfo().serverID)
-        let previousQueue = UserDefaults.standard.string(forKey: queueKey)
-        let cleanupKey = queueKey + ".pendingCleanup"
-        let result = try run("""
-        set p to make new user playlist with properties {name:"音乐遥控 · 当前播放"}
-        try
-        repeat with trackIndex in {\(indices)}
-            duplicate (track (trackIndex as integer) of library playlist 1) to p
-        end repeat
-        set shuffle enabled to \(shuffle ? "true" : "false")
-        set song repeat to off
-        play p once false
-        set shuffle enabled to \(shuffle ? "true" : "false")
-        return persistent ID of p
-        on error queueErrorMessage number queueErrorNumber
-            try
-                delete p
-            end try
-            error queueErrorMessage number queueErrorNumber
-        end try
-        """)
-        guard let playlistID = result.stringValue else { throw failure("无法确认新播放列表。") }
-        playbackIDs = []; playbackPlaylistID = nil
-        var pendingCleanup = Set(UserDefaults.standard.stringArray(forKey: cleanupKey) ?? [])
-        pendingCleanup.insert(playlistID)
-        UserDefaults.standard.set(Array(pendingCleanup), forKey: cleanupKey)
-        do { try verifyPlaybackPlaylist(playlistID, firstID: shuffle ? nil : ids[start]) }
-        catch {
-            if (try? removeManagedPlaylist(playlistID)) != nil {
-                pendingCleanup.remove(playlistID)
-                UserDefaults.standard.set(Array(pendingCleanup), forKey: cleanupKey)
-            }
-            throw error
-        }
-        UserDefaults.standard.set(playlistID, forKey: queueKey)
-        var cleanup = Set(UserDefaults.standard.stringArray(forKey: cleanupKey) ?? [])
-        if let previousQueue, previousQueue != playlistID { cleanup.insert(previousQueue) }
-        cleanup.remove(playlistID)
-        UserDefaults.standard.set(Array(cleanup), forKey: cleanupKey)
-        queueCleanupWarning = nil
-        for old in cleanup {
-            do { try removeManagedPlaylist(old); cleanup.remove(old) }
-            catch {
-                if (error as NSError).code == -1728 { cleanup.remove(old) }
-                else { queueCleanupWarning = "旧内部播放列表未能清理，下次选歌时将重试。" }
-            }
-        }
-        UserDefaults.standard.set(Array(cleanup), forKey: cleanupKey)
-        // Never delete track objects: removing a playlist only removes its container.
-        // Persist ownership across companion restarts; one settled queue remains.
-        playbackIDs = ids; playbackStart = start; playbackPlaylistID = playlistID
+        let candidate = MemoryPlaybackQueue(ids: ids, start: start, shuffle: shuffle)
+        try playDirect(candidate.current)
+        memoryQueue = candidate
+        lastQueueSample = try nativeStatus(); lastQueueSampleAt = Date()
     }
-    private func removeManagedPlaylist(_ id: String) throws {
-        guard id.count == 16, id.allSatisfy({ $0.isHexDigit }) else { return }
-        let name = try run("get name of first user playlist whose persistent ID is \(Self.quote(id))").stringValue
-        guard name == "音乐遥控 · 当前播放" else { return }
-        _ = try run("delete (first user playlist whose persistent ID is \(Self.quote(id)))")
-        cachedPlaylists?.removeAll { $0.id == id }
-        cachedPlaylistTracks[id] = nil
-        snapshot?.playlists.removeAll { $0.id == id }
-        snapshot?.playlistTracks[id] = nil
-        saveSnapshot()
-    }
-    private func verifyPlaybackPlaylist(_ playlistID: String, firstID: String?) throws {
-        let expectedTrack = firstID.map { " and (persistent ID of current track is \(Self.quote($0)))" } ?? ""
+    private func playDirect(_ id: String, paused: Bool = false) throws {
         _ = try run("""
-        set acceptedReports to 0
-        repeat 30 times
-            try
-                if (player state is playing) and (persistent ID of current playlist is \(Self.quote(playlistID)))\(expectedTrack) then
-                    set acceptedReports to acceptedReports + 1
-                    if acceptedReports >= 3 then return true
-                else
-                    set acceptedReports to 0
-                end if
-            on error
-                set acceptedReports to 0
-            end try
-            delay 0.1
-        end repeat
-        error "音乐应用未接受新播放队列，请重新选择专辑。"
+        set shuffle enabled to false
+        set song repeat to off
+        play (first track of library playlist 1 whose persistent ID is \(Self.quote(id))) once true
         """)
+        var accepted: Playback? = nil
+        for _ in 0..<15 {
+            let state = try nativeStatus()
+            if state.trackID == id && state.playing { accepted = state; break }
+            _ = try run("delay 0.1")
+        }
+        guard var accepted else { throw failure("音乐应用未能播放选中的歌曲。") }
+        if paused {
+            _ = try run("delay 0.2\npause")
+            accepted.playing = false; pausedQueuePlayback = accepted
+        } else { pausedQueuePlayback = nil }
+    }
+    func status() throws -> Playback {
+        let state = try nativeStatus()
+        guard let queue = memoryQueue else { return state }
+        let now = Date()
+        if var paused = pausedQueuePlayback {
+            if state.playing { pausedQueuePlayback = nil }
+            else if state.trackID == nil || state.trackID == queue.current {
+                paused.contextID = playbackIntentID; paused.shuffle = queue.shuffle
+                paused.repeatMode = queue.repeatMode; paused.volume = state.volume
+                return paused
+            }
+        }
+        if let previous = lastQueueSample, previous.playing, previous.trackID == queue.current,
+           previous.duration > 0, !state.playing, state.trackID == nil,
+           previous.position + now.timeIntervalSince(lastQueueSampleAt) >= previous.duration - 0.5 {
+            try moveNext(automatic: true, wasPlaying: true)
+            return try nativeStatus()
+        }
+        if let id = state.trackID, id != queue.current {
+            // A deliberate Music/other-controller change owns playback now.
+            memoryQueue = nil; playbackIntentID = nil; lastQueueSample = nil; pausedQueuePlayback = nil
+            var external = state; external.contextID = nil; return external
+        }
+        lastQueueSample = state; lastQueueSampleAt = now
+        return state
+    }
+    func tick() throws { if hasQueue { _ = try status() } }
+    private func moveNext(automatic: Bool, wasPlaying: Bool) throws {
+        guard var queue = memoryQueue else { try advanceNative("next track"); return }
+        if let id = queue.next(automatic: automatic) {
+            try playDirect(id, paused: !wasPlaying)
+            memoryQueue = queue
+            lastQueueSample = try nativeStatus(); lastQueueSampleAt = Date()
+        } else {
+            _ = try run("stop")
+            lastQueueSample = nil
+        }
     }
     func audioRoutes() throws -> [AudioRoute] {
         let result = try run("""
@@ -412,43 +363,69 @@ final class MusicBridge {
     }
     func execute(_ packet: Packet) throws {
         if let expected = packet.playbackContextID, ["next", "previous", "play", "pause", "seek"].contains(packet.action) {
-            guard try status().contextID == expected else { throw failure("播放队列已改变，旧控制已取消，请刷新播放状态后重试。") }
+            _ = try status()
+            guard playbackIntentID == expected, memoryQueue != nil else { throw failure("播放队列已改变，旧控制已取消，请刷新播放状态后重试。") }
         }
         switch packet.action {
         case "shuffle":
             guard packet.value == 0 || packet.value == 1 else { throw failure("随机播放设置无效。") }
-            _ = try run("set shuffle enabled to " + (packet.value == 1 ? "true" : "false"))
+            if memoryQueue != nil { memoryQueue?.setShuffle(packet.value == 1) }
+            else { _ = try run("set shuffle enabled to " + (packet.value == 1 ? "true" : "false")) }
         case "repeat":
             guard let value = packet.value, [0.0, 1.0, 2.0].contains(value) else { throw failure("循环播放设置无效。") }
-            _ = try run("set song repeat to " + (value == 0 ? "off" : value == 1 ? "all" : "one"))
+            if memoryQueue != nil { memoryQueue?.repeatMode = Int(value) }
+            else { _ = try run("set song repeat to " + (value == 0 ? "off" : value == 1 ? "all" : "one")) }
         case "queue":
-            playbackIntentID = nil
             try playQueue(packet.trackIDs ?? (packet.tracks ?? []).map(\.id), start: packet.offset ?? 0, shuffle: packet.value == 1)
             playbackIntentID = packet.id
-        case "play": _ = try run("play")
-        case "pause": _ = try run("pause")
-        case "stop": _ = try run("stop")
+        case "play":
+            if let queue = memoryQueue, let paused = pausedQueuePlayback {
+                try playDirect(queue.current)
+                if paused.position > 0 { _ = try run("set player position to \(paused.position)") }
+            } else if let queue = memoryQueue, try nativeStatus().trackID == nil { try playDirect(queue.current) }
+            else { _ = try run("play") }
+            lastQueueSample = try nativeStatus(); lastQueueSampleAt = Date()
+        case "pause":
+            let before = try status()
+            _ = try run("pause")
+            if memoryQueue != nil { var paused = before; paused.playing = false; pausedQueuePlayback = paused }
+            lastQueueSample = nil
+        case "stop":
+            memoryQueue = nil; playbackIntentID = nil; lastQueueSample = nil; pausedQueuePlayback = nil
+            _ = try run("stop")
         case "previous":
             let current = try status()
-            if current.contextID != nil, current.shuffle != true, current.position < 3, playbackStart > 0,
-               playbackIDs.indices.contains(playbackStart), current.trackID == playbackIDs[playbackStart] {
-                try playQueue(playbackIDs, start: playbackStart - 1, shuffle: false)
-                if !current.playing { _ = try run("pause") }
+            if var queue = memoryQueue {
+                let id = current.position >= 3 ? queue.current : queue.previous()
+                try playDirect(id, paused: !current.playing)
+                memoryQueue = queue; lastQueueSample = try nativeStatus(); lastQueueSampleAt = Date()
             } else { try advanceNative("previous track") }
-        case "next": try advanceNative("next track")
+        case "next":
+            let current = try status()
+            try moveNext(automatic: false, wasPlaying: current.playing)
         case "seek":
             guard let value = packet.value, value.isFinite, value >= 0 else { throw failure("播放进度无效。") }
             let current = try status()
             guard current.duration > 0 else { throw failure("当前歌曲不支持调整进度。") }
-            _ = try run("set player position to \(min(value, current.duration))")
+            if pausedQueuePlayback != nil { pausedQueuePlayback?.position = min(value, current.duration) }
+            else {
+                var seekError: Error?
+                for _ in 0..<3 {
+                    do { _ = try run("delay 0.1\nset player position to \(min(value, current.duration))"); seekError = nil; break }
+                    catch { seekError = error; if (error as NSError).code != -28 { break } }
+                }
+                if let seekError { throw seekError }
+                lastQueueSample = try nativeStatus(); lastQueueSampleAt = Date()
+            }
         case "volume":
             guard let value = packet.value, value.isFinite, (0...100).contains(value) else { throw failure("音量值无效。") }
             _ = try run("set sound volume to \(Int(value))")
         case "track":
+            memoryQueue = nil; playbackIntentID = nil; lastQueueSample = nil; pausedQueuePlayback = nil
             guard let track = packet.track else { throw failure("没有收到歌曲信息。") }
             if let id = track.macID {
                 guard id.count == 16 && id.allSatisfy({ $0.isHexDigit }) else { throw failure("Mac 曲目 ID 无效。") }
-                _ = try run("play (first track of library playlist 1 whose persistent ID is \(Self.quote(id)))")
+                try playDirect(id)
             } else {
                 // iPhone library IDs are NOT Mac persistent IDs. Resolve only a
                 // unique metadata match; never guess or silently play another song.
@@ -468,7 +445,7 @@ final class MusicBridge {
                 guard candidates.numberOfItems == 1, let id = candidates.atIndex(1)?.stringValue else {
                     throw failure("Mac 资料库中没有唯一匹配的歌曲。请先在 Mac 添加或同步这首歌，或从“Mac 资料库”选择准确的版本。")
                 }
-                _ = try run("play (first track of library playlist 1 whose persistent ID is \(Self.quote(id)))")
+                try playDirect(id)
             }
         default: throw failure("暂不支持此操作。")
         }

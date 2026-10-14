@@ -3,6 +3,14 @@ import Network
 
 @main struct Tests {
     static func main() throws {
+        var queue = MemoryPlaybackQueue(ids: ["a","b","c"], start: 1, shuffle: false)
+        precondition(queue.current == "b" && queue.previous() == "a")
+        precondition(queue.next() == "b" && queue.next() == "c" && queue.next() == nil)
+        queue.repeatMode = 1; precondition(queue.next(automatic: true) == "a")
+        queue.repeatMode = 2; precondition(queue.next(automatic: true) == "a" && queue.next() == "b")
+        queue.setShuffle(true); precondition(queue.current == "b" && Set(queue.ids) == Set(["a","b","c"]))
+        queue.setShuffle(false); precondition(queue.current == "b" && queue.ids == ["a","b","c"])
+        print("PASS: in-memory full context, shuffle, manual Next and repeat-one/all boundaries")
         let cacheRoot = FileManager.default.temporaryDirectory.appendingPathComponent("ModernRemote-cache-tests-" + UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: cacheRoot) }
         let first = LibraryDiskCache(namespace: "Mac A:Library 1", root: cacheRoot)

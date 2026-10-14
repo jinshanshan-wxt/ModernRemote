@@ -1,6 +1,6 @@
 import socket,json,uuid,subprocess,time
 import argparse,threading
-parser=argparse.ArgumentParser(description="Opt-in real Music.app playback regression. Stop Music before running; creates dated remote playlists.")
+parser=argparse.ArgumentParser(description="Opt-in real Music.app playback regression. Stop Music before running; uses only the companion in-memory queue.")
 parser.add_argument('--host',default='127.0.0.1')
 parser.add_argument('--port',type=int,required=True)
 parser.add_argument('--polling-controllers',type=int,choices=range(5),default=0,help='Optional concurrent status polling controllers')
